@@ -1,0 +1,3 @@
+[workspace]
+members = ["gateway", "client/hermes"]
+resolver = "2"

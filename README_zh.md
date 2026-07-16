@@ -1,0 +1,184 @@
+# wechat-gateway
+
+微信 iLink 消息网关 — 将一条微信连接复用到多个 AI agent。
+
+## 背景
+
+微信 iLink Bot API 有独占限制：一个微信账号同时只能有一个长轮询连接。当你本地有多个 AI agent（Hermes、OpenClaw、Claude Code 等）都需要接入微信时，需要一个代理网关来维护微信的连接，做消息分发和切换。
+
+## 架构
+
+```
+WeChat ←── iLink 协议 ──→ wechat-gateway (Rust)
+                               │
+                      ┌────────┴────────┐
+                      │  Agent Router    │
+                      │  /cmd Executor   │
+                      └────────┬────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+          Hermes            OpenClaw          ...(agent)
+        (HTTP 轮询)       (HTTP 轮询)        (HTTP 轮询)
+```
+
+**核心设计原则：**
+
+- **Gateway 是中心** — 维护微信 iLink 独占长轮询连接
+- **Agent 主动注册** — agent 启动时通过 HTTP 注册到 gateway，带上名字
+- **`/use <name>` 切换** — 微信内发消息切换当前激活的 agent
+- **`/cmd <shell>` 执行** — 微信内直接执行 shell 命令
+
+## 项目结构
+
+```
+wechat-gateway/
+├── gateway/                 # 网关核心 (Rust crate)
+│   └── src/
+│       ├── ilink/           # iLink 协议实现
+│       │   ├── types.rs     # iLink 类型定义 (serde)
+│       │   └── client.rs    # HTTP 客户端 (扫码登录/长轮询/发消息)
+│       ├── agents/
+│       │   ├── registry.rs  # Agent 注册表
+│       │   └── queue.rs     # 消息队列
+│       ├── router/
+│       │   ├── router.rs    # 消息路由
+│       │   └── commands.rs  # 命令解析 (/use, /list, /status, /cmd)
+│       ├── api/server.rs    # HTTP API (axum)
+│       ├── storage/         # SQLite 凭证持久化
+│       └── config.rs
+│
+├── client/hermes/           # Hermes ACP 客户端 (Rust crate)
+│   └── src/
+│       ├── gateway/api.rs   # 网关 API 客户端
+│       ├── acp/client.rs    # Hermes ACP JSON-RPC 通信
+│       └── client.rs        # 主循环编排
+│
+└── docs/
+```
+
+### 消息流
+
+```
+WeChat → long-poll getupdates → Router.handle_incoming()
+  ├── 是命令 (/use, /list, /status, /cmd)
+  │     → 内置处理，直接发回微信
+  └── 是普通消息
+        → 推入 active_agent 的消息队列
+        → agent 通过 GET /api/agents/{name}/poll 拉取
+        → agent 处理完后 POST /api/agents/{name}/reply
+        → gateway 通过 sendmessage 发回微信
+```
+
+### 内置命令
+
+| 命令 | 用途 |
+|------|------|
+| `/use <name>` | 切换到指定 agent |
+| `/list` | 列出已注册 agent |
+| `/status` | 查看连接和 agent 状态 |
+| `/cmd <shell>` | 执行 shell 命令（支持 `timeout <秒>` 前缀） |
+
+## 快速开始
+
+### 前置要求
+
+- Rust 1.75+
+- 一个微信账号（用于扫码登录）
+
+### 构建
+
+```bash
+cd wechat-gateway
+
+# 使用代理（国内网络需要）
+export HTTP_PROXY=http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:7897
+
+# 构建
+cargo build --release
+```
+
+### 运行测试
+
+```bash
+# 运行全部测试
+cargo test
+
+# 仅运行网关测试
+cargo test -p wechat-gateway
+
+# 仅运行 Hermes 客户端测试
+cargo test -p wechat-gateway-client-hermes
+```
+
+> **注意**: `main.rs` 还没有实现，当前阶段所有模块都有完整的单元测试覆盖。
+
+### 注册 Agent
+
+Agent 启动后通过 HTTP 注册到网关：
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/agents/register \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "my-agent", "capabilities": ["text"]}'
+```
+
+### 轮询和回复
+
+```bash
+# Agent 轮询消息
+curl http://127.0.0.1:8765/api/agents/my-agent/poll
+
+# 回复消息
+curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
+  -H 'Content-Type: application/json' \
+  -d '{"reply_to_id": "msg_id", "text": "回复内容"}'
+```
+
+### 查看状态
+
+```bash
+curl http://127.0.0.1:8765/api/status
+```
+
+## 配置
+
+网关通过环境变量配置：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `GW_HTTP_ADDR` | `127.0.0.1` | HTTP API 监听地址 |
+| `GW_HTTP_PORT` | `8765` | HTTP API 端口 |
+| `GW_ILINK_BASE_URL` | `https://ilinkai.weixin.qq.com` | iLink API 地址 |
+| `GW_DB_PATH` | `~/.wechat-gateway/data.db` | 数据库路径 |
+| `GW_CMD_TIMEOUT` | `30` | `/cmd` 默认超时(秒) |
+| `GW_CMD_MAX_OUTPUT` | `2000` | `/cmd` 最大输出字符数 |
+| `GW_GATEWAY_URL` | `http://127.0.0.1:8765` | Hermes 客户端连接的网关地址 |
+| `GW_AGENT_NAME` | `hermes` | Hermes 注册名 |
+| `GW_HERMES_BIN` | `hermes` | hermes 可执行文件路径 |
+| `GW_HERMES_CWD` | 当前目录 | ACP 会话工作目录 |
+| `GW_POLL_INTERVAL` | `1` | 轮询间隔(秒) |
+| `GW_ACP_TIMEOUT` | `300` | ACP 会话超时(秒) |
+
+## iLink 协议要点
+
+iLink 是腾讯官方的微信 Bot API 协议（2026 年开放），纯 HTTP/JSON。核心端点：
+
+| 端点 | 功能 |
+|------|------|
+| `GET /ilink/bot/get_bot_qrcode` | 获取登录二维码 |
+| `GET /ilink/bot/get_qrcode_status` | 轮询扫码状态 |
+| `POST /ilink/bot/getupdates` | 长轮询接收消息 (35s hold) |
+| `POST /ilink/bot/sendmessage` | 发送消息 |
+| `POST /ilink/bot/sendtyping` | 发送"正在输入"状态 |
+| `POST /ilink/bot/getconfig` | 获取 typing_ticket |
+| `POST /ilink/bot/msg/notifystart` | 开启出站消息能力 |
+
+每个请求需要 `X-WECHAT-UIN` Header（随机 uint32 → 十进制 → base64，每次请求重新生成）和 `AuthorizationType: ilink_bot_token`。
+
+iLink token 有效期为 24 小时，返回 `errcode: -14` 表示过期，需要重新扫码。
+
+## 许可证
+
+MIT
