@@ -18,6 +18,7 @@ use axum::{
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::agents::ws_registry::WsRegistry;
 use crate::config::GatewayConfig;
 use crate::error::Result;
 use crate::ilink::types::{AgentReply, AgentStatus};
@@ -46,6 +47,7 @@ pub struct ReplyRequest {
 pub struct AppState {
     pub router: Arc<Mutex<InternalRouter>>,
     pub reply_tx: UnboundedSender<AgentReply>,
+    pub ws_registry: WsRegistry,
 }
 
 // ─── Router builder ─────────────────────────────────────────────────────────
@@ -57,6 +59,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/agents/{name}/poll", get(handle_poll))
         .route("/api/agents/{name}/reply", post(handle_reply))
         .route("/api/status", get(handle_status))
+        .route("/ws/agents/{name}", get(super::ws::ws_handler))
         .with_state(Arc::new(state))
 }
 
@@ -243,6 +246,7 @@ mod tests {
                 crate::agents::queue::MessageQueue::new(),
             ))),
             reply_tx,
+            ws_registry: WsRegistry::new(),
         }
     }
 
@@ -352,6 +356,7 @@ mod tests {
                 crate::agents::queue::MessageQueue::new(),
             ))),
             reply_tx,
+            ws_registry: WsRegistry::new(),
         });
 
         let (_status, _json) = post_json(&state, "/api/agents/hermes/reply", serde_json::json!({

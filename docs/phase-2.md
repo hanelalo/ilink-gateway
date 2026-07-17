@@ -59,8 +59,20 @@ Gateway 负责检测心跳超时，而不是 agent 主动发心跳（简化 agen
 - 完整的 CDN 加密上传 → 构造媒体 sendmessage 流程（目前 media_paths 回复发文本提示）
 
 ---
+## 3. WebSocket 推送 ✅
 
-## 3. WebSocket 推送
+### 问题
+
+当前 agent 通过 HTTP 轮询拉取消息（模式 A），延迟受 poll interval 限制（默认 1s），实时性不够高。
+
+### 已实现
+
+- **WsRegistry** — `gateway/src/agents/ws_registry.rs`，`Arc<Mutex<HashMap<String, UnboundedSender<String>>>>`，每个 agent 最多一个 WS 连接，新的替换旧的
+- **WS 端点** — `GET /ws/agents/{name}`，可选的实时通道
+- **出站（gateway → agent）** — main.rs 的 poll 循环中，消息入队后同时尝试 WS 推送，JSON 格式 `{"type":"message",...}`
+- **入站（agent → gateway）** — 收到 `{"type":"reply",...}` 后解析为 `AgentReply`，走现有的 `reply_tx` channel 发送
+- **心跳** — 每 30s ping/pong，断线自动清理注册
+- **回退** — WS 断开后继续等 HTTP poll，两者共存
 
 ### 问题
 
@@ -114,10 +126,10 @@ Gateway 负责检测心跳超时，而不是 agent 主动发心跳（简化 agen
 
 ---
 
-## 实现优先级
-
-1. **Agent 心跳检测** — ✅ 已完成
-2. **媒体文件收发** — 功能完整性的关键缺口，但技术复杂度较高
-3. **WebSocket 推送** — 性能优化，优先级最低
+| 实现优先级 | 状态 |
+|------------|------|
+| Agent 心跳检测 | ✅ 已完成 |
+| 媒体文件收发（含 CDN 上传） | ✅ 已完成 |
+| WebSocket 推送 | ✅ 已完成 |
 
 建议按 1 → 2 → 3 的顺序实现。

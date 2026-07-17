@@ -19,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::agents::queue::MessageQueue;
 use crate::agents::registry::AgentRegistry;
+use crate::agents::ws_registry::WsRegistry;
 use crate::api::server::{start_server, AppState};
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
@@ -74,13 +75,15 @@ async fn main() -> Result<()> {
     // 5. Build AppState for the HTTP API
     let router_arc = Arc::new(Mutex::new(router));
 
-    // Create reply channel and message context store
+    // Create reply channel, message context store, and WebSocket registry
     let (reply_tx, reply_rx) = tokio::sync::mpsc::unbounded_channel::<AgentReply>();
     let message_contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let ws_registry = WsRegistry::new();
     let _state = AppState {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
+        ws_registry: ws_registry.clone(),
     };
 
     // 5b. Spawn heartbeat checker (every 30s, timeout 60s)
@@ -131,6 +134,7 @@ async fn main() -> Result<()> {
     let server_state = AppState {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
+        ws_registry: ws_registry.clone(),
     };
     tokio::spawn(async move {
         if let Err(e) = start_server(&server_config, server_state).await {
@@ -175,11 +179,13 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                let reply_text = {
+                let (reply_text, active_agent) = {
                     let mut router_guard = router_arc.lock().unwrap();
-                    router_guard.handle_incoming(&msg).unwrap_or_else(|e| {
+                    let active = router_guard.active_agent().map(|s| s.to_string());
+                    let reply = router_guard.handle_incoming(&msg).unwrap_or_else(|e| {
                         Some(format!("Error processing message: {e}"))
-                    })
+                    });
+                    (reply, active)
                 };
 
                 if let Some(text) = reply_text {
@@ -213,6 +219,22 @@ async fn main() -> Result<()> {
                                 },
                             );
                         }
+                    }
+
+                    // Try WebSocket push for real-time delivery to the active agent
+                    if let Some(ref agent) = active_agent {
+                        let msg_id = msg.message_id.map(|id| id.to_string()).unwrap_or_default();
+                        let ws_json = serde_json::json!({
+                            "type": "message",
+                            "id": msg_id,
+                            "from_user": msg.from_user_id.clone().unwrap_or_default(),
+                            "text": msg.text().unwrap_or(""),
+                            "timestamp": msg.create_time_ms.unwrap_or(0),
+                            "context_token": msg.context_token.clone().unwrap_or_default(),
+                            "message_type": "text",
+                        })
+                        .to_string();
+                        ws_registry.push(agent, &ws_json);
                     }
                 }
             }
