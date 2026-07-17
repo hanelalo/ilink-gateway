@@ -115,7 +115,7 @@ pub async fn handle_poll(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let router = state.router.lock().unwrap();
+    let mut router = state.router.lock().unwrap();
 
     if !router.registry().contains(&name) {
         return (
@@ -125,6 +125,9 @@ pub async fn handle_poll(
             })),
         );
     }
+
+    // Refresh heartbeat — agent is alive
+    let _ = router.registry_mut().mark_online(&name);
 
     let messages = router.queue().dequeue_all(&name).unwrap_or_default();
 
@@ -325,6 +328,36 @@ mod tests {
         assert!(json.get("active_agent").is_some());
         assert!(json.get("agents").is_some());
         assert_eq!(json["wechat"]["connected"], false);
+    }
+
+    #[tokio::test]
+    async fn test_poll_updates_last_seen() {
+        let state = Arc::new(make_state());
+
+        // Register via API
+        let (status, _) = post_json(&state, "/api/agents/register", serde_json::json!({
+            "name": "hermes",
+            "capabilities": ["text"],
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Get last_seen before poll
+        let (_, json_before) = get_json(&state, "/api/status").await;
+        let before = json_before["agents"]["hermes"]["last_seen"].as_i64().unwrap();
+
+        // Small delay
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+
+        // Poll — should update last_seen
+        let (status, _) = get_json(&state, "/api/agents/hermes/poll").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Get last_seen after poll
+        let (_, json_after) = get_json(&state, "/api/status").await;
+        let after = json_after["agents"]["hermes"]["last_seen"].as_i64().unwrap();
+
+        assert!(after > before, "last_seen should increase after poll");
     }
 
     #[tokio::test]

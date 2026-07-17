@@ -106,6 +106,23 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Check all agents for heartbeat timeout.
+    /// Marks agents as Offline if their last_seen is older than threshold_secs.
+    /// Returns the list of agents that were marked offline (for logging).
+    pub fn check_heartbeat(&mut self, threshold_secs: u64) -> Vec<String> {
+        let cutoff = now_millis() - (threshold_secs as i64 * 1000);
+        let mut offlined = Vec::new();
+
+        for agent in self.agents.values_mut() {
+            if agent.status == AgentStatus::Online && agent.last_seen < cutoff {
+                agent.status = AgentStatus::Offline;
+                offlined.push(agent.name.clone());
+            }
+        }
+
+        offlined
+    }
+
     /// Count online agents.
     pub fn online_count(&self) -> usize {
         self.agents
@@ -262,6 +279,104 @@ mod tests {
         registry.register("hermes", None, &[]).unwrap();
         assert_eq!(registry.len(), 1);
         assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn test_check_heartbeat_recent_stays_online() {
+        let mut registry = AgentRegistry::new();
+        registry.register("hermes", None, &[]).unwrap();
+
+        // Recently registered — last_seen is now, so within any reasonable threshold
+        let offlined = registry.check_heartbeat(60);
+        assert!(offlined.is_empty());
+        assert_eq!(registry.get("hermes").unwrap().status, AgentStatus::Online);
+    }
+
+    #[test]
+    fn test_check_heartbeat_old_is_marked_offline() {
+        let mut registry = AgentRegistry::new();
+        registry.register("hermes", None, &[]).unwrap();
+
+        // Simulate old last_seen by directly manipulating the inner map
+        let old_time = now_millis() - 100_000; // 100 seconds ago
+        if let Some(agent) = registry.agents.get_mut("hermes") {
+            agent.last_seen = old_time;
+        }
+
+        let offlined = registry.check_heartbeat(10);
+        assert_eq!(offlined, vec!["hermes"]);
+        assert_eq!(registry.get("hermes").unwrap().status, AgentStatus::Offline);
+    }
+
+    #[test]
+    fn test_check_heartbeat_already_offline_stays_offline() {
+        let mut registry = AgentRegistry::new();
+        registry.register("hermes", None, &[]).unwrap();
+        registry.mark_offline("hermes").unwrap();
+
+        // Already offline — should not be re-listed
+        let offlined = registry.check_heartbeat(1);
+        assert!(offlined.is_empty());
+        assert_eq!(registry.get("hermes").unwrap().status, AgentStatus::Offline);
+    }
+
+    #[test]
+    fn test_check_heartbeat_multiple_agents_only_old_affected() {
+        let mut registry = AgentRegistry::new();
+        registry.register("hermes", None, &[]).unwrap(); // stays recent
+        registry.register("zeus", None, &[]).unwrap();
+
+        // Make zeus old
+        let old_time = now_millis() - 100_000;
+        if let Some(agent) = registry.agents.get_mut("zeus") {
+            agent.last_seen = old_time;
+        }
+
+        let mut offlined = registry.check_heartbeat(10);
+        offlined.sort();
+        assert_eq!(offlined, vec!["zeus"]);
+        assert_eq!(registry.get("hermes").unwrap().status, AgentStatus::Online);
+        assert_eq!(registry.get("zeus").unwrap().status, AgentStatus::Offline);
+    }
+
+    #[test]
+    fn test_check_heartbeat_empty_registry() {
+        let mut registry = AgentRegistry::new();
+        let offlined = registry.check_heartbeat(60);
+        assert!(offlined.is_empty());
+    }
+
+    #[test]
+    fn test_check_heartbeat_boundary_just_within_threshold() {
+        let mut registry = AgentRegistry::new();
+        registry.register("hermes", None, &[]).unwrap();
+
+        // Set last_seen to exactly threshold_secs ago (should stay online)
+        let threshold = 5u64;
+        let boundary_time = now_millis() - (threshold as i64 * 1000);
+        if let Some(agent) = registry.agents.get_mut("hermes") {
+            agent.last_seen = boundary_time;
+        }
+
+        let offlined = registry.check_heartbeat(threshold);
+        assert!(offlined.is_empty(), "exactly at boundary should stay online");
+        assert_eq!(registry.get("hermes").unwrap().status, AgentStatus::Online);
+    }
+
+    #[test]
+    fn test_check_heartbeat_just_past_threshold() {
+        let mut registry = AgentRegistry::new();
+        registry.register("hermes", None, &[]).unwrap();
+
+        // Set last_seen to threshold_secs + 1 ago (should go offline)
+        let too_old = now_millis() - (11 * 1000);
+        if let Some(agent) = registry.agents.get_mut("hermes") {
+            agent.last_seen = too_old;
+        }
+
+        let offlined = registry.check_heartbeat(10);
+        assert_eq!(offlined, vec!["hermes"]);
+        assert_eq!(registry.get("hermes").unwrap().status, AgentStatus::Offline);
     }
 
     #[test]
