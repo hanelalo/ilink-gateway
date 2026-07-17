@@ -26,45 +26,47 @@ HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 cargo build
 
 ## Architecture
 
-Two Rust crates in a workspace:
+Two Rust crates in a workspace, each with a binary entry point:
 
-### `gateway/` — iLink WeChat message gateway
+### `gateway/` — iLink WeChat message gateway (binary: `wechat-gateway`)
 
 Core gateway that maintains the single iLink long-poll connection to WeChat and routes messages to registered agents.
 
 ```
 gateway/src/
-├── ilink/           # WeChat iLink protocol implementation
-│   ├── types.rs     # All iLink wire types (WeixinMessage, GetUpdates, SendMessage, etc.)
-│   └── client.rs    # HTTP client: QR login, long-poll getupdates, sendmessage, sendtyping, getconfig, notifystart
-├── agents/          # Agent lifecycle management
-│   ├── registry.rs  # AgentRegistry: name→AgentInfo mapping, online/offline tracking
-│   └── queue.rs     # MessageQueue: per-agent FIFO queues (Arc<Mutex<...>>)
-├── router/          # Message routing and commands
-│   ├── router.rs    # Router: wires registry + queue + commands, handles incoming WeChat messages
-│   └── commands.rs  # Command parser: /use, /list, /status, /cmd + executor + dangerous command filter
-├── api/server.rs    # Axum HTTP API: POST register, GET poll, POST reply, GET status
-├── storage/         # SQLite credential persistence
+├── main.rs            # Binary entry: config → QR login → long-poll loop → HTTP API
+├── ilink/             # WeChat iLink protocol implementation
+│   ├── types.rs       # All iLink wire types (WeixinMessage, GetUpdates, SendMessage, etc.)
+│   └── client.rs      # HTTP client: QR login, long-poll getupdates, sendmessage, sendtyping, getconfig, notifystart
+├── agents/            # Agent lifecycle management
+│   ├── registry.rs    # AgentRegistry: name→AgentInfo mapping, online/offline tracking
+│   └── queue.rs       # MessageQueue: per-agent FIFO queues (Arc<Mutex<...>>)
+├── router/            # Message routing and commands
+│   ├── router.rs      # Router: wires registry + queue + commands, handles incoming WeChat messages
+│   └── commands.rs    # Command parser: /use, /list, /status, /cmd + executor + dangerous command filter
+├── api/server.rs      # Axum HTTP API: POST register, GET poll, POST reply, GET status
+├── storage/           # SQLite credential persistence
 │   └── sqlite_store.rs
-├── config.rs        # Env-based configuration
-└── error.rs         # GatewayError enum
+├── config.rs          # Env-based configuration
+└── error.rs           # GatewayError enum
 ```
 
 **Key constraint**: iLink token expires every 24h. The client detects `errcode: -14` from getupdates and triggers QR re-login.
 
 **Message flow**: WeChat → iLink long-poll → Router.handle_incoming() → parse command or enqueue to active agent's queue → agent polls via HTTP API → agent replies → sendmessage back to WeChat.
 
-### `client/hermes/` — Hermes ACP client crate
+### `client/hermes/` — Hermes ACP client crate (binary: `wechat-gateway-client-hermes`)
 
 Agent-side client that connects to the gateway and forwards messages to Hermes via its ACP protocol.
 
 ```
 client/hermes/src/
-├── gateway/api.rs   # HTTP client for gateway REST API (register, poll, reply)
-├── acp/client.rs    # JSON-RPC 2.0 client over stdio for Hermes ACP subprocess
-├── client.rs        # HermesClient orchestrator: register → poll loop → ACP session → reply
-├── config.rs        # Env-based client configuration
-└── error.rs         # ClientError enum
+├── main.rs           # Binary entry: register → spawn ACP → poll loop
+├── gateway/api.rs    # HTTP client for gateway REST API (register, poll, reply)
+├── acp/client.rs     # JSON-RPC 2.0 client over stdio for Hermes ACP subprocess
+├── client.rs         # HermesClient orchestrator: register → poll loop → ACP session → reply
+├── config.rs         # Env-based client configuration
+└── error.rs          # ClientError enum
 ```
 
 **ACP protocol**: Hermes' Agent Client Protocol runs `hermes acp` as a subprocess, communicating via JSON-RPC 2.0 over stdin/stdout. Key methods: `initialize` → `sessions/new` → `sessions/{id}/send` (UserMessageChunk) → collect AgentMessageChunk response → `sessions/{id}/close`.

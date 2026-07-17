@@ -9,13 +9,14 @@ use crate::agents::queue::MessageQueue;
 use crate::agents::registry::AgentRegistry;
 use crate::error::{GatewayError, Result};
 use crate::ilink::types::{msg_type, AgentMessage, QueuedMessage, RouterCommand, WeixinMessage};
-use crate::router::commands::parse_command;
+use crate::router::commands::{execute_command, is_dangerous_command, parse_command};
 
 /// Central message router that coordinates message handling.
 pub struct Router {
     registry: AgentRegistry,
     queue: MessageQueue,
     active_agent: Option<String>,
+    cmd_max_output_chars: usize,
 }
 
 impl Router {
@@ -25,7 +26,13 @@ impl Router {
             registry,
             queue,
             active_agent: None,
+            cmd_max_output_chars: 2000,
         }
+    }
+
+    /// Set the maximum number of characters for `/cmd` command output.
+    pub fn set_cmd_max_output_chars(&mut self, max: usize) {
+        self.cmd_max_output_chars = max;
     }
 
     /// Set the active agent. Returns error if agent not registered.
@@ -46,6 +53,11 @@ impl Router {
     ///
     /// Returns `Some(text)` if it is a built-in command that should be replied
     /// directly, or `None` if the message was routed to the active agent's queue.
+    ///
+    /// This method is synchronous by design — `Router` is shared behind
+    /// `std::sync::Mutex` in HTTP API state, and a `MutexGuard` must not be
+    /// held across `.await` points.  When the `/cmd` branch needs the async
+    /// `execute_command` it bridges via `tokio::task::block_in_place`.
     pub fn handle_incoming(&mut self, msg: &WeixinMessage) -> Result<Option<String>> {
         let text = msg.text().ok_or_else(|| {
             GatewayError::Command("Message has no text content".to_string())
@@ -93,8 +105,27 @@ impl Router {
             }
             Some(RouterCommand::ListAgents) => Ok(Some(self.build_list_text())),
             Some(RouterCommand::Status) => Ok(Some(self.build_status_text())),
-            Some(RouterCommand::Cmd { command, .. }) => {
-                Ok(Some(format!("Command execution not supported: {command}")))
+            Some(RouterCommand::Cmd {
+                command,
+                timeout_secs,
+            }) => {
+                if is_dangerous_command(&command) {
+                    return Ok(Some(format!(
+                        "Dangerous command blocked: {command}"
+                    )));
+                }
+                // execute_command is async but we are behind a std::sync::MutexGuard
+                // so we bridge via block_in_place + Handle::block_on.
+                let max = self.cmd_max_output_chars;
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        execute_command(&command, timeout_secs, max).await
+                    })
+                });
+                match result {
+                    Ok(output) => Ok(Some(output)),
+                    Err(e) => Ok(Some(format!("Command error: {e}"))),
+                }
             }
             None => Ok(Some(format!("Unknown command: {text}"))),
         }
@@ -132,7 +163,12 @@ impl Router {
     /// Convert a WeixinMessage to a canonical AgentMessage for agent delivery.
     pub fn to_agent_message(msg: &WeixinMessage) -> Option<AgentMessage> {
         let text = msg.text()?;
-        let item_type = msg.item_list.as_ref()?.first()?.item_type.unwrap_or(msg_type::TEXT);
+        let item_type = msg
+            .item_list
+            .as_ref()?
+            .first()?
+            .item_type
+            .unwrap_or(msg_type::TEXT);
         let message_type = match item_type {
             msg_type::TEXT => "text",
             msg_type::IMAGE => "image",
@@ -309,6 +345,28 @@ mod tests {
         assert!(text.contains("Unknown"));
     }
 
+    /// /cmd test.  Needs a multi-thread runtime because handle_command uses
+    /// `tokio::task::block_in_place` to bridge to async execute_command.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_incoming_cmd_executes_command() {
+        let mut router = setup();
+        let msg = make_text_msg("/cmd echo hello_from_cmd");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("hello_from_cmd"));
+    }
+
+    #[test]
+    fn test_handle_incoming_cmd_blocked_dangerous() {
+        let mut router = setup();
+        let msg = make_text_msg("/cmd rm -rf /");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("Dangerous") || text.contains("blocked"));
+    }
+
     #[test]
     fn test_to_agent_message_converts_correctly() {
         let msg = make_text_msg("test message");
@@ -365,5 +423,13 @@ mod tests {
     fn test_queue_reference() {
         let router = setup();
         assert!(!router.queue().has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_set_cmd_max_output_chars() {
+        let mut router = setup();
+        assert_eq!(router.cmd_max_output_chars, 2000);
+        router.set_cmd_max_output_chars(500);
+        assert_eq!(router.cmd_max_output_chars, 500);
     }
 }
