@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Code Navigation
+
+This repository is indexed by CodeGraph. Use `codegraph_explore` (MCP tool) for code understanding and navigation — prefer it over grep/find/Read for symbol lookup, architecture questions, and relationship discovery. A single call returns the verbatin source of all relevant symbols plus the call paths between them.
+
 ## Build & Test
 
 ```bash
