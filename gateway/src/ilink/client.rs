@@ -177,7 +177,6 @@ impl Client {
     /// `POST /ilink/bot/sendtyping` — show or cancel the "typing" indicator.
     ///
     /// Status: 1 = start typing, 2 = stop typing.
-    #[allow(dead_code)]
     pub async fn send_typing(
         &self,
         token: &str,
@@ -198,7 +197,6 @@ impl Client {
     }
 
     /// `POST /ilink/bot/getconfig` — obtain the typing ticket for a user.
-    #[allow(dead_code)]
     pub async fn get_config(
         &self,
         token: &str,

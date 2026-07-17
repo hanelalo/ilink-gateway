@@ -346,7 +346,6 @@ pub struct SendMessageResponse {
 
 // ── SendTyping ───────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct SendTypingRequest {
     pub ilink_user_id: String,
@@ -358,7 +357,6 @@ pub struct SendTypingRequest {
 
 // ── GetConfig ────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct GetConfigRequest {
     pub ilink_user_id: String,
@@ -369,7 +367,6 @@ pub struct GetConfigRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct GetConfigResponse {
     #[allow(dead_code)]
     #[serde(default)]

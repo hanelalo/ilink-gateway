@@ -97,6 +97,8 @@ async fn main() -> Result<()> {
     let (reply_tx, reply_rx) = tokio::sync::mpsc::unbounded_channel::<AgentReply>();
     let message_contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let typing_ticket_cache: Arc<Mutex<HashMap<String, String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let ws_registry = WsRegistry::new();
     let _state = AppState {
         router: router_arc.clone(),
@@ -140,10 +142,11 @@ async fn main() -> Result<()> {
         };
         let reply_token = token.clone();
         let reply_ctx = message_contexts.clone();
+        let reply_tickets = typing_ticket_cache.clone();
         let reply_router = router_arc.clone();
         let mut rx = reply_rx;
         tokio::spawn(async move {
-            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, &mut rx).await;
+            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, reply_tickets, &mut rx).await;
         });
     }
 
@@ -224,9 +227,12 @@ async fn main() -> Result<()> {
                             let context_token = msg.context_token.unwrap_or_default();
                             let to_user = msg.from_user_id.unwrap_or_default();
 
+                            // Show typing indicator before command reply
+                            send_typing_indicator(&client, &current_token, &to_user, &typing_ticket_cache).await;
+
                             let reply = crate::ilink::types::WeixinMessage::build_text_reply(
                                 context_token,
-                                to_user,
+                                to_user.clone(),
                                 text,
                             );
                             let send_req = SendMessageRequest {
@@ -237,6 +243,8 @@ async fn main() -> Result<()> {
                             if let Err(e) = client.send_message(&current_token, &send_req).await {
                                 tracing::warn!("send_message error: {e}");
                             }
+
+                            stop_typing_indicator(&client, &current_token, &to_user, &typing_ticket_cache).await;
                         } else {
                             // Message was routed to agent queue — record context for reply lookup
                             if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
@@ -320,6 +328,94 @@ fn spawn_heartbeat_checker(router: Arc<Mutex<Router>>, check_interval_secs: u64,
     });
 }
 
+// ─── Typing indicator helpers ──────────────────────────────────────────────
+
+/// Send a typing indicator before replying to a user.
+///
+/// 1. Look up a cached typing_ticket for this user.
+/// 2. If missing, fetch one via `client.get_config()`.
+/// 3. POST `sendtyping` with status=1.
+///
+/// Errors are silently ignored — typing is best-effort.
+async fn send_typing_indicator(
+    client: &IlinkClient,
+    token: &str,
+    user_id: &str,
+    ticket_cache: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    let ticket = get_or_fetch_ticket(client, token, user_id, ticket_cache).await;
+    let Some(ticket) = ticket else {
+        return;
+    };
+
+    let req = crate::ilink::types::SendTypingRequest {
+        ilink_user_id: user_id.to_string(),
+        typing_ticket: ticket,
+        status: 1,
+        base_info: None,
+    };
+    let _ = client.send_typing(token, &req).await;
+}
+
+/// Stop the typing indicator after sending a reply.
+///
+/// POST `sendtyping` with status=2 using the cached ticket.
+/// Errors are silently ignored.
+async fn stop_typing_indicator(
+    client: &IlinkClient,
+    token: &str,
+    user_id: &str,
+    ticket_cache: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    let ticket = {
+        let cache = ticket_cache.lock().unwrap();
+        cache.get(user_id).cloned()
+    };
+    if let Some(ticket) = ticket {
+        let req = crate::ilink::types::SendTypingRequest {
+            ilink_user_id: user_id.to_string(),
+            typing_ticket: ticket,
+            status: 2,
+            base_info: None,
+        };
+        let _ = client.send_typing(token, &req).await;
+    }
+}
+
+/// Get a typing_ticket from cache, or fetch from the server and cache it.
+async fn get_or_fetch_ticket(
+    client: &IlinkClient,
+    token: &str,
+    user_id: &str,
+    ticket_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    // Check cache first
+    {
+        let cache = ticket_cache.lock().unwrap();
+        if let Some(ticket) = cache.get(user_id) {
+            return Some(ticket.clone());
+        }
+    }
+
+    // Fetch new ticket
+    let req = crate::ilink::types::GetConfigRequest {
+        ilink_user_id: user_id.to_string(),
+        context_token: None,
+        base_info: None,
+    };
+    match client.get_config(token, &req).await {
+        Ok(resp) => {
+            if let Some(ticket) = resp.typing_ticket {
+                ticket_cache.lock().unwrap().insert(user_id.to_string(), ticket.clone());
+                Some(ticket)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
 // ─── Reply processor ──────────────────────────────────────────────────────
 
 /// Background task that processes agent replies from the channel.
@@ -332,6 +428,7 @@ async fn handle_agent_replies(
     token: String,
     _router: Arc<Mutex<Router>>,
     contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>>,
+    ticket_cache: Arc<Mutex<HashMap<String, String>>>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentReply>,
 ) {
     while let Some(reply) = rx.recv().await {
@@ -351,8 +448,9 @@ async fn handle_agent_replies(
 
         if reply.media_paths.is_empty() {
             // Text-only reply
+            send_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
             let reply_msg =
-                WeixinMessage::build_text_reply(context_token, to_user, reply.text);
+                WeixinMessage::build_text_reply(context_token, to_user.clone(), reply.text);
             let req = SendMessageRequest {
                 msg: reply_msg,
                 base_info: None,
@@ -360,9 +458,12 @@ async fn handle_agent_replies(
             if let Err(e) = client.send_message(&token, &req).await {
                 tracing::error!("failed to send text reply: {e}");
             }
+            stop_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
         } else {
             // Media reply — encrypt and upload each file, then send
             use crate::ilink::media::process_media_upload;
+
+            send_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
 
             // Process the first media file
             let first_path = &reply.media_paths[0];
@@ -401,6 +502,8 @@ async fn handle_agent_replies(
                     }
                 }
             }
+
+            stop_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
 
             // Acknowledge additional files as text
             for extra_path in &reply.media_paths[1..] {
@@ -1108,12 +1211,14 @@ mod tests {
             AgentRegistry::new(),
             MessageQueue::new(),
         )));
+        let tickets: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(async move {
             handle_agent_replies(
                 client,
                 "test-token".to_string(),
                 router,
                 ctx_clone,
+                tickets,
                 &mut rx,
             )
             .await;
@@ -1192,9 +1297,10 @@ mod tests {
             AgentRegistry::new(),
             MessageQueue::new(),
         )));
+        let tickets: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
         tokio::spawn(async move {
-            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, &mut rx)
+            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, tickets, &mut rx)
                 .await;
         });
 
@@ -1212,6 +1318,146 @@ mod tests {
         upload_mock.assert();
         cdn_mock.assert();
         send_mock.assert();
+    }
+
+    // ─── Typing indicator tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_typing_indicator_calls_get_config_and_send_typing() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Mock getconfig — typing ticket response
+        let config_mock = server
+            .mock("POST", "/ilink/bot/getconfig")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({
+                "ret": 0,
+                "typing_ticket": "ticket-abc",
+                "errmsg": "ok"
+            }).to_string())
+            .create();
+
+        // Mock sendtyping — start typing
+        let typing_mock = server
+            .mock("POST", "/ilink/bot/sendtyping")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(mockito::Matcher::JsonString(
+                serde_json::json!({
+                    "ilink_user_id": "user@wx",
+                    "typing_ticket": "ticket-abc",
+                    "status": 1
+                }).to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        send_typing_indicator(&client, "test-token", "user@wx", &cache).await;
+
+        config_mock.assert();
+        typing_mock.assert();
+
+        // Ticket should be cached
+        let cached = cache.lock().unwrap();
+        assert_eq!(cached.get("user@wx").unwrap(), "ticket-abc");
+    }
+
+    #[tokio::test]
+    async fn test_send_typing_indicator_reuses_cached_ticket() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Pre-populate cache
+        cache.lock().unwrap().insert("user@wx".to_string(), "cached-ticket".to_string());
+
+        // Only mock sendtyping — getconfig should NOT be called
+        let typing_mock = server
+            .mock("POST", "/ilink/bot/sendtyping")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(mockito::Matcher::JsonString(
+                serde_json::json!({
+                    "ilink_user_id": "user@wx",
+                    "typing_ticket": "cached-ticket",
+                    "status": 1
+                }).to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        // No getconfig mock — test will fail if getconfig is called
+        send_typing_indicator(&client, "test-token", "user@wx", &cache).await;
+
+        typing_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_stop_typing_indicator_sends_status_2() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Pre-populate cache
+        cache.lock().unwrap().insert("user@wx".to_string(), "ticket-abc".to_string());
+
+        let typing_mock = server
+            .mock("POST", "/ilink/bot/sendtyping")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(mockito::Matcher::JsonString(
+                serde_json::json!({
+                    "ilink_user_id": "user@wx",
+                    "typing_ticket": "ticket-abc",
+                    "status": 2
+                }).to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        stop_typing_indicator(&client, "test-token", "user@wx", &cache).await;
+
+        typing_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_typing_indicator_error_does_not_block() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Mock getconfig that will fail
+        let config_mock = server
+            .mock("POST", "/ilink/bot/getconfig")
+            .with_status(500)
+            .create();
+
+        // Should not panic or error out
+        send_typing_indicator(&client, "test-token", "user@wx", &cache).await;
+
+        config_mock.assert();
+
+        // Cache should still be empty
+        let cached = cache.lock().unwrap();
+        assert!(cached.get("user@wx").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_or_fetch_ticket_returns_cached() {
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        cache.lock().unwrap().insert("user@wx".to_string(), "cached-ticket".to_string());
+
+        // No server needed — cache hit doesn't make HTTP calls
+        let client = IlinkClient::new(Some("http://localhost:1".to_string())).unwrap();
+        let ticket = get_or_fetch_ticket(&client, "token", "user@wx", &cache).await;
+        assert_eq!(ticket, Some("cached-ticket".to_string()));
     }
 
     // ─── Helper ───────────────────────────────────────────────────────────
