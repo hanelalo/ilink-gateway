@@ -37,20 +37,22 @@ wechat-gateway/
 │   └── src/
 │       ├── ilink/           # iLink 协议实现
 │       │   ├── types.rs     # iLink 类型定义 (serde)
-│       │   └── client.rs    # HTTP 客户端 (扫码登录/长轮询/发消息)
+│       │   ├── client.rs    # HTTP 客户端 (扫码登录/长轮询/发消息/媒体上传)
+│       │   ├── media.rs     # AES-128-ECB 加密解密 + CDN URL 校验
+│       │   └── download.rs  # CDN 媒体下载 (SSRF 防护)
 │       ├── agents/
-│       │   ├── registry.rs  # Agent 注册表
+│       │   ├── registry.rs  # Agent 注册表 (含心跳检测)
 │       │   └── queue.rs     # 消息队列
 │       ├── router/
-│       │   ├── router.rs    # 消息路由
+│       │   ├── router.rs    # 消息路由 (支持媒体类型)
 │       │   └── commands.rs  # 命令解析 (/use, /list, /status, /cmd)
-│       ├── api/server.rs    # HTTP API (axum)
+│       ├── api/server.rs    # HTTP API (axum) + 回复通道
 │       ├── storage/         # SQLite 凭证持久化
 │       └── config.rs
 │
 ├── client/hermes/           # Hermes ACP 客户端 (Rust crate)
 │   └── src/
-│       ├── gateway/api.rs   # 网关 API 客户端
+│       ├── gateway/api.rs   # 网关 API 客户端 (支持媒体)
 │       ├── acp/client.rs    # Hermes ACP JSON-RPC 通信
 │       └── client.rs        # 主循环编排
 │
@@ -64,11 +66,19 @@ WeChat → long-poll getupdates → Router.handle_incoming()
   ├── 是命令 (/use, /list, /status, /cmd)
   │     → 内置处理，直接发回微信
   └── 是普通消息
+        → 记录上下文 (用于回复路由)
         → 推入 active_agent 的消息队列
         → agent 通过 GET /api/agents/{name}/poll 拉取
         → agent 处理完后 POST /api/agents/{name}/reply
-        → gateway 通过 sendmessage 发回微信
+        → main.rs 回复处理器通过 channel 接收
+        → 通过 sendmessage 发回微信 (文本或媒体)
 ```
+
+### 功能特性
+
+- **Agent 心跳检测** — 通过 poll 时间戳自动检测离线 agent（30 秒检查, 60 秒超时）
+- **媒体消息支持** — 图片/语音/视频/文件类型，AES-128-ECB CDN 加密解密
+- **回复通道** — 异步回复处理，通过 tokio mpsc 通道分离 HTTP API 和 iLink 发送
 
 ### 内置命令
 
@@ -112,7 +122,7 @@ cargo test -p wechat-gateway
 cargo test -p wechat-gateway-client-hermes
 ```
 
-> **注意**: `main.rs` 还没有实现，当前阶段所有模块都有完整的单元测试覆盖。
+> **注意**: 所有模块都有完整的单元测试覆盖（约 190 个 gateway 测试，约 50 个 hermes 客户端测试）。
 
 ### 注册 Agent
 
@@ -134,6 +144,11 @@ curl http://127.0.0.1:8765/api/agents/my-agent/poll
 curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
   -H 'Content-Type: application/json' \
   -d '{"reply_to_id": "msg_id", "text": "回复内容"}'
+
+# 回复消息（带媒体文件）
+curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
+  -H 'Content-Type: application/json' \
+  -d '{"reply_to_id": "msg_id", "text": "图片回复", "media_paths": ["/tmp/image.jpg"]}'
 ```
 
 ### 查看状态
@@ -172,12 +187,13 @@ iLink 是腾讯官方的微信 Bot API 协议（2026 年开放），纯 HTTP/JSO
 | `POST /ilink/bot/getupdates` | 长轮询接收消息 (35s hold) |
 | `POST /ilink/bot/sendmessage` | 发送消息 |
 | `POST /ilink/bot/sendtyping` | 发送"正在输入"状态 |
+| `POST /ilink/bot/getuploadurl` | 获取 CDN 媒体上传地址 |
 | `POST /ilink/bot/getconfig` | 获取 typing_ticket |
 | `POST /ilink/bot/msg/notifystart` | 开启出站消息能力 |
 
 每个请求需要 `X-WECHAT-UIN` Header（随机 uint32 → 十进制 → base64，每次请求重新生成）和 `AuthorizationType: ilink_bot_token`。
 
-iLink token 有效期为 24 小时，返回 `errcode: -14` 表示过期，需要重新扫码。
+`errcode: -14` 表示临时会话超时，非凭据过期，休眠 600 秒后自动重试即可。扫码授权为长期授权，无需重新扫码。
 
 ## 许可证
 

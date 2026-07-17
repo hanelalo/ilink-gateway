@@ -12,6 +12,7 @@
 //! 9. Enter the long-poll getupdates loop
 //! 10. Handle errcode -14 (session expired) by re-running QR login
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tracing_subscriber::EnvFilter;
@@ -22,7 +23,7 @@ use crate::api::server::{start_server, AppState};
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
 use crate::ilink::client::Client as IlinkClient;
-use crate::ilink::types::SendMessageRequest;
+use crate::ilink::types::{AgentReply, SendMessageRequest, WeixinMessage};
 use crate::router::router::Router;
 use crate::storage::sqlite_store::SqliteStore;
 
@@ -34,6 +35,13 @@ mod error;
 mod ilink;
 mod router;
 mod storage;
+
+/// Context info needed to send a reply back via iLink.
+#[derive(Debug, Clone)]
+struct MessageContextInfo {
+    context_token: String,
+    to_user: String,
+}
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -65,8 +73,14 @@ async fn main() -> Result<()> {
 
     // 5. Build AppState for the HTTP API
     let router_arc = Arc::new(Mutex::new(router));
+
+    // Create reply channel and message context store
+    let (reply_tx, reply_rx) = tokio::sync::mpsc::unbounded_channel::<AgentReply>();
+    let message_contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let _state = AppState {
         router: router_arc.clone(),
+        reply_tx: reply_tx.clone(),
     };
 
     // 5b. Spawn heartbeat checker (every 30s, timeout 60s)
@@ -94,10 +108,29 @@ async fn main() -> Result<()> {
         tracing::warn!("notify_start failed (will retry in loop): {e}");
     }
 
+    // 7b. Spawn reply processor background task
+    {
+        let reply_client = match IlinkClient::new(Some(base_url.clone())) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("failed to create iLink client for reply processor: {e}");
+                return Err(e);
+            }
+        };
+        let reply_token = token.clone();
+        let reply_ctx = message_contexts.clone();
+        let reply_router = router_arc.clone();
+        let mut rx = reply_rx;
+        tokio::spawn(async move {
+            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, &mut rx).await;
+        });
+    }
+
     // 8. Spawn the HTTP API server
     let server_config = config.clone();
     let server_state = AppState {
         router: router_arc.clone(),
+        reply_tx: reply_tx.clone(),
     };
     tokio::spawn(async move {
         if let Err(e) = start_server(&server_config, server_state).await {
@@ -166,6 +199,21 @@ async fn main() -> Result<()> {
                     if let Err(e) = client.send_message(&current_token, &send_req).await {
                         tracing::warn!("send_message error: {e}");
                     }
+                } else {
+                    // Message was routed to agent queue — record context for reply lookup
+                    if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
+                        if let (Some(ctx), Some(user)) =
+                            (msg.context_token.clone(), msg.from_user_id.clone())
+                        {
+                            message_contexts.lock().unwrap().insert(
+                                msg_id,
+                                MessageContextInfo {
+                                    context_token: ctx,
+                                    to_user: user,
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -188,6 +236,111 @@ fn spawn_heartbeat_checker(router: Arc<Mutex<Router>>, check_interval_secs: u64,
             }
         }
     });
+}
+
+// ─── Reply processor ──────────────────────────────────────────────────────
+
+/// Background task that processes agent replies from the channel.
+///
+/// Receives `AgentReply` from the HTTP API and sends them through iLink.
+/// For text-only replies, sends directly. For media replies, sends a text
+/// status (full CDN flow is future work).
+async fn handle_agent_replies(
+    client: IlinkClient,
+    token: String,
+    _router: Arc<Mutex<Router>>,
+    contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentReply>,
+) {
+    while let Some(reply) = rx.recv().await {
+        // Look up context by reply_to_id
+        let ctx_info = {
+            let map = contexts.lock().unwrap();
+            map.get(&reply.reply_to_id).cloned()
+        };
+
+        let (context_token, to_user) = match ctx_info {
+            Some(info) => (info.context_token, info.to_user),
+            None => {
+                tracing::warn!("no context found for reply_to_id={}", reply.reply_to_id);
+                continue;
+            }
+        };
+
+        if reply.media_paths.is_empty() {
+            // Text-only reply
+            let reply_msg =
+                WeixinMessage::build_text_reply(context_token, to_user, reply.text);
+            let req = SendMessageRequest {
+                msg: reply_msg,
+                base_info: None,
+            };
+            if let Err(e) = client.send_message(&token, &req).await {
+                tracing::error!("failed to send text reply: {e}");
+            }
+        } else {
+            // Media reply — encrypt and upload each file, then send
+            use crate::ilink::media::process_media_upload;
+
+            // Process the first media file
+            let first_path = &reply.media_paths[0];
+            match process_media_upload(&client, &token, first_path).await {
+                Ok((item_type, encrypt_query_param, aes_key)) => {
+                    let reply_msg = WeixinMessage::build_media_reply(
+                        context_token.clone(),
+                        to_user.clone(),
+                        reply.text.clone(),
+                        item_type,
+                        encrypt_query_param,
+                        aes_key,
+                    );
+                    let req = SendMessageRequest {
+                        msg: reply_msg,
+                        base_info: None,
+                    };
+                    if let Err(e) = client.send_message(&token, &req).await {
+                        tracing::error!("failed to send media reply: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("failed to process media upload: {e}");
+                    // Fallback: send text with error
+                    let reply_msg = WeixinMessage::build_text_reply(
+                        context_token.clone(),
+                        to_user.clone(),
+                        format!("Media processing failed: {e}"),
+                    );
+                    let req = SendMessageRequest {
+                        msg: reply_msg,
+                        base_info: None,
+                    };
+                    if let Err(e2) = client.send_message(&token, &req).await {
+                        tracing::error!("failed to send fallback message: {e2}");
+                    }
+                }
+            }
+
+            // Acknowledge additional files as text
+            for extra_path in &reply.media_paths[1..] {
+                let note = format!("Additional file received: {extra_path}");
+                let reply_msg = WeixinMessage::build_text_reply(
+                    context_token.clone(),
+                    to_user.clone(),
+                    note,
+                );
+                let req = SendMessageRequest {
+                    msg: reply_msg,
+                    base_info: None,
+                };
+                if let Err(e) = client.send_message(&token, &req).await {
+                    tracing::error!("failed to send additional file note: {e}");
+                }
+            }
+        }
+
+        // Clean up context entry
+        contexts.lock().unwrap().remove(&reply.reply_to_id);
+    }
 }
 
 // ─── QR login helper ────────────────────────────────────────────────────────
@@ -677,6 +830,202 @@ mod tests {
             router.registry().get("zeus").unwrap().status,
             AgentStatus::Offline
         );
+    }
+
+    // ─── Agent reply processor tests ──────────────────────────────────────
+
+    #[test]
+    fn test_message_context_recording() {
+        use crate::ilink::types::{MessageItem, TextItem, chat_type, msg_type};
+
+        let mut router = Router::new(AgentRegistry::new(), MessageQueue::new());
+        router
+            .registry_mut()
+            .register("hermes", None, &["text".to_string()])
+            .unwrap();
+        router.set_active_agent("hermes").unwrap();
+
+        let msg = crate::ilink::types::WeixinMessage {
+            message_id: Some(100),
+            from_user_id: Some("user@wx".to_string()),
+            context_token: Some("ctx-reply-789".to_string()),
+            message_type: Some(chat_type::USER),
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::TEXT),
+                text_item: Some(TextItem {
+                    text: Some("agent message".to_string()),
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        // Simulate the long-poll logic
+        let reply_text = router.handle_incoming(&msg).unwrap();
+        assert!(reply_text.is_none(), "normal message should be routed to queue");
+
+        // Now record context (same logic as in main loop)
+        let contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
+            if let (Some(ctx), Some(user)) = (msg.context_token.clone(), msg.from_user_id.clone())
+            {
+                contexts.lock().unwrap().insert(
+                    msg_id,
+                    MessageContextInfo {
+                        context_token: ctx,
+                        to_user: user,
+                    },
+                );
+            }
+        }
+
+        let map = contexts.lock().unwrap();
+        let info = map
+            .get("100")
+            .expect("context should be recorded for message_id 100");
+        assert_eq!(info.context_token, "ctx-reply-789");
+        assert_eq!(info.to_user, "user@wx");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_agent_reply_flow_with_mock() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+
+        // Mock sendmessage endpoint
+        let send_mock = server
+            .mock("POST", "/ilink/bot/sendmessage")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        // Set up contexts with a mapping
+        let contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        contexts.lock().unwrap().insert(
+            "msg-42".to_string(),
+            MessageContextInfo {
+                context_token: "ctx-999".to_string(),
+                to_user: "user@wx".to_string(),
+            },
+        );
+
+        // Create reply channel
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentReply>();
+
+        // Spawn the reply processor
+        let ctx_clone = contexts.clone();
+        let router = Arc::new(Mutex::new(Router::new(
+            AgentRegistry::new(),
+            MessageQueue::new(),
+        )));
+        tokio::spawn(async move {
+            handle_agent_replies(
+                client,
+                "test-token".to_string(),
+                router,
+                ctx_clone,
+                &mut rx,
+            )
+            .await;
+        });
+
+        // Send a text reply through the channel
+        tx.send(AgentReply {
+            reply_to_id: "msg-42".to_string(),
+            text: "Hello from agent".to_string(),
+            media_paths: vec![],
+        })
+        .unwrap();
+
+        // Drop the sender so the receiver loop exits after processing
+        drop(tx);
+
+        // Give the processor time to process
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        send_mock.assert();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_media_reply_with_mock() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+
+        // Create a temp file to use as "media"
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let media_path = tmp_dir.path().join("test.jpg");
+        std::fs::write(&media_path, b"fake image data").unwrap();
+
+        // Mock getuploadurl
+        let cdn_url = format!("{}/cdn/upload?encrypted_param_123", server.url());
+        let upload_mock = server
+            .mock("POST", "/ilink/bot/getuploadurl")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({
+                "ret": 0,
+                "cdnurl": cdn_url,
+                "aes_key": "0123456789abcdef0123456789abcdef"
+            }).to_string())
+            .create();
+
+        // Mock CDN upload (PUT)
+        let cdn_mock = server
+            .mock("PUT", "/cdn/upload")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .create();
+
+        // Mock sendmessage
+        let send_mock = server
+            .mock("POST", "/ilink/bot/sendmessage")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        // Set up contexts
+        let contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        contexts.lock().unwrap().insert(
+            "msg-99".to_string(),
+            MessageContextInfo {
+                context_token: "ctx-555".to_string(),
+                to_user: "user@wx".to_string(),
+            },
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentReply>();
+        let ctx_clone = contexts.clone();
+        let router = Arc::new(Mutex::new(Router::new(
+            AgentRegistry::new(),
+            MessageQueue::new(),
+        )));
+
+        tokio::spawn(async move {
+            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, &mut rx)
+                .await;
+        });
+
+        // Send a media reply
+        tx.send(AgentReply {
+            reply_to_id: "msg-99".to_string(),
+            text: "Check this image".to_string(),
+            media_paths: vec![media_path.to_string_lossy().to_string()],
+        })
+        .unwrap();
+
+        drop(tx);
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        upload_mock.assert();
+        cdn_mock.assert();
+        send_mock.assert();
     }
 
     // ─── Helper ───────────────────────────────────────────────────────────

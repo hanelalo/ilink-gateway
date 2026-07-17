@@ -216,6 +216,26 @@ impl Client {
         Ok(serde_json::from_str(&resp.text().await?)?)
     }
 
+    /// `POST /ilink/bot/getuploadurl` — obtain CDN upload URL and AES key.
+    pub async fn get_upload_url(
+        &self,
+        token: &str,
+        req: &GetUploadUrlRequest,
+    ) -> Result<GetUploadUrlResponse> {
+        let url = format!("{}/ilink/bot/getuploadurl", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .headers(build_headers(Some(token)))
+            .json(req)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(GatewayError::Ilink(format!("HTTP {}", resp.status())));
+        }
+        Ok(serde_json::from_str(&resp.text().await?)?)
+    }
+
     /// `POST /ilink/bot/msg/notifystart` — required at connection start
     /// to signal the bot is ready to receive updates.
     pub async fn notify_start(&self, token: &str) -> Result<()> {
@@ -693,6 +713,80 @@ mod tests {
             Err(GatewayError::Ilink(msg)) => assert_eq!(msg, "invalid token"),
             other => panic!("expected Ilink error, got {other:?}"),
         }
+        _mock.assert();
+    }
+
+    // ── GetUploadUrl ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_upload_url_returns_cdn_url_and_key() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::new(Some(server.url())).unwrap();
+
+        let req = GetUploadUrlRequest {
+            aes_key: "test-aes-key-123".to_string(),
+            item_type: msg_type::IMAGE,
+            file_size: 65536,
+            file_md5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            base_info: None,
+        };
+
+        let _mock = server
+            .mock("POST", "/ilink/bot/getuploadurl")
+            .match_header("authorization", "Bearer upload-token")
+            .match_header("authorizationtype", "ilink_bot_token")
+            .match_body(mockito::Matcher::JsonString(
+                json!({
+                    "aes_key": "test-aes-key-123",
+                    "type": 2,
+                    "file_size": 65536,
+                    "file_md5": "d41d8cd98f00b204e9800998ecf8427e"
+                })
+                .to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "ret": 0,
+                    "cdnurl": "https://cdn.weixin.qq.com/upload",
+                    "aes_key": "response-aes-key",
+                    "errmsg": "ok"
+                })
+                .to_string(),
+            )
+            .create();
+
+        let resp = client.get_upload_url("upload-token", &req).await.unwrap();
+        assert_eq!(resp.ret, 0);
+        assert_eq!(
+            resp.cdnurl.as_deref(),
+            Some("https://cdn.weixin.qq.com/upload")
+        );
+        assert_eq!(resp.aes_key.as_deref(), Some("response-aes-key"));
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_upload_url_handles_http_error() {
+        let mut server = mockito::Server::new_async().await;
+        let client = Client::new(Some(server.url())).unwrap();
+
+        let req = GetUploadUrlRequest {
+            aes_key: "key".to_string(),
+            item_type: 2,
+            file_size: 1024,
+            file_md5: "abc".to_string(),
+            base_info: None,
+        };
+
+        let _mock = server
+            .mock("POST", "/ilink/bot/getuploadurl")
+            .with_status(400)
+            .create();
+
+        let result = client.get_upload_url("token", &req).await;
+        assert!(result.is_err(), "HTTP 400 should propagate as an error");
         _mock.assert();
     }
 

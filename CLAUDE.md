@@ -35,25 +35,28 @@ Core gateway that maintains the single iLink long-poll connection to WeChat and 
 ```
 gateway/src/
 ├── main.rs            # Binary entry: config → QR login → long-poll loop → HTTP API
+│                      #   + reply processor (channel-based) + heartbeat checker
 ├── ilink/             # WeChat iLink protocol implementation
-│   ├── types.rs       # All iLink wire types (WeixinMessage, GetUpdates, SendMessage, etc.)
-│   └── client.rs      # HTTP client: QR login, long-poll getupdates, sendmessage, sendtyping, getconfig, notifystart
+│   ├── types.rs       # All iLink wire types (WeixinMessage, GetUpdates, SendMessage, media types, etc.)
+│   ├── client.rs      # HTTP client: QR login, long-poll getupdates, sendmessage, sendtyping, getconfig, notifystart, getuploadurl
+│   ├── media.rs       # AES-128-ECB encrypt/decrypt, CDN URL validation
+│   └── download.rs    # CDN media download with SSRF protection
 ├── agents/            # Agent lifecycle management
-│   ├── registry.rs    # AgentRegistry: name→AgentInfo mapping, online/offline tracking
+│   ├── registry.rs    # AgentRegistry: name→AgentInfo mapping, online/offline tracking, heartbeat check
 │   └── queue.rs       # MessageQueue: per-agent FIFO queues (Arc<Mutex<...>>)
 ├── router/            # Message routing and commands
-│   ├── router.rs      # Router: wires registry + queue + commands, handles incoming WeChat messages
+│   ├── router.rs      # Router: wires registry + queue + commands, media-aware message extraction
 │   └── commands.rs    # Command parser: /use, /list, /status, /cmd + executor + dangerous command filter
-├── api/server.rs      # Axum HTTP API: POST register, GET poll, POST reply, GET status
+├── api/server.rs      # Axum HTTP API: POST register, GET poll, POST reply (via channel), GET status
 ├── storage/           # SQLite credential persistence
 │   └── sqlite_store.rs
 ├── config.rs          # Env-based configuration
 └── error.rs           # GatewayError enum
 ```
 
-**Key constraint**: iLink token expires every 24h. The client detects `errcode: -14` from getupdates and triggers QR re-login.
+**Key constraint**: The iLink connection may return `errcode: -14` on temporary session timeout. The client sleeps 600s and retries automatically — QR authorization is long-term and does not require re-scanning.
 
-**Message flow**: WeChat → iLink long-poll → Router.handle_incoming() → parse command or enqueue to active agent's queue → agent polls via HTTP API → agent replies → sendmessage back to WeChat.
+**Message flow**: WeChat → iLink long-poll → Router.handle_incoming() → parse command or enqueue to active agent's queue → agent polls via HTTP API → agent replies via POST reply → reply processor (channel-based) sends sendmessage back to WeChat. Media messages are extracted into `AgentMessage.media` with CDN download + AES-128-ECB decryption path.
 
 ### `client/hermes/` — Hermes ACP client crate (binary: `wechat-gateway-client-hermes`)
 

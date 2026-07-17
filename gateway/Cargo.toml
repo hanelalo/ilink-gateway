@@ -44,12 +44,20 @@ rand = "0.9"
 # Base64
 base64 = "0.22"
 
+# AES-128-ECB
+aes = "0.8"
+cipher = "0.4"
+
 # QR code terminal rendering
 qrcode = "0.14"
 image = "0.25"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# MD5
+md-5 = "0.10"
+hex = "0.4"
 
 # Command execution
 futures = "0.3"

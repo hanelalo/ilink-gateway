@@ -37,20 +37,22 @@ wechat-gateway/
 │   └── src/
 │       ├── ilink/           # iLink protocol implementation
 │       │   ├── types.rs     # iLink type definitions (serde)
-│       │   └── client.rs    # HTTP client (QR login / long-poll / send message)
+│       │   ├── client.rs    # HTTP client (QR login / long-poll / send message / media upload)
+│       │   ├── media.rs     # AES-128-ECB encryption/decryption + CDN URL validation
+│       │   └── download.rs  # CDN media download with SSRF protection
 │       ├── agents/
-│       │   ├── registry.rs  # Agent registry
+│       │   ├── registry.rs  # Agent registry with heartbeat tracking
 │       │   └── queue.rs     # Message queue
 │       ├── router/
-│       │   ├── router.rs    # Message router
+│       │   ├── router.rs    # Message router (media-aware)
 │       │   └── commands.rs  # Command parser (/use, /list, /status, /cmd)
-│       ├── api/server.rs    # HTTP API (axum)
+│       ├── api/server.rs    # HTTP API (axum) + reply channel
 │       ├── storage/         # SQLite credential persistence
 │       └── config.rs
 │
 ├── client/hermes/           # Hermes ACP client (Rust crate)
 │   └── src/
-│       ├── gateway/api.rs   # Gateway API client
+│       ├── gateway/api.rs   # Gateway API client (with media support)
 │       ├── acp/client.rs    # Hermes ACP JSON-RPC communication
 │       └── client.rs        # Main orchestrator loop
 │
@@ -64,11 +66,19 @@ WeChat → long-poll getupdates → Router.handle_incoming()
   ├── is command (/use, /list, /status, /cmd)
   │     → handle built-in, reply directly to WeChat
   └── is normal message
+        → record context (for reply routing)
         → enqueue to active agent's message queue
         → agent pulls via GET /api/agents/{name}/poll
         → agent processes, then POST /api/agents/{name}/reply
-        → gateway sends reply via sendmessage back to WeChat
+        → main.rs reply processor receives via channel
+        → sends via sendmessage back to WeChat (text or media)
 ```
+
+### Features
+
+- **Agent heartbeat detection** — gateway auto-detects offline agents via poll timestamps (30s check, 60s timeout)
+- **Media message support** — image/voice/video/file types with AES-128-ECB CDN encryption/decryption
+- **Reply channel** — asynchronous reply processing via tokio mpsc channel, separates HTTP API from iLink sending
 
 ### Built-in Commands
 
@@ -112,7 +122,7 @@ cargo test -p wechat-gateway
 cargo test -p wechat-gateway-client-hermes
 ```
 
-> **Note**: The `main.rs` entry point is not yet implemented. All modules have complete unit test coverage.
+> **Note**: All modules have complete unit test coverage (~190 gateway tests, ~50 hermes client tests).
 
 ### Registering an Agent
 
@@ -170,12 +180,13 @@ iLink is Tencent's official WeChat Bot API (opened in 2026), pure HTTP/JSON. Key
 | `POST /ilink/bot/getupdates` | Long-poll receive messages (35s hold) |
 | `POST /ilink/bot/sendmessage` | Send a message |
 | `POST /ilink/bot/sendtyping` | Send typing indicator |
+| `POST /ilink/bot/getuploadurl` | Get CDN media upload URL |
 | `POST /ilink/bot/getconfig` | Get typing ticket |
 | `POST /ilink/bot/msg/notifystart` | Enable outbound message capability |
 
 Each request requires the `X-WECHAT-UIN` header (random uint32 → decimal string → base64, regenerated per request) and `AuthorizationType: ilink_bot_token`.
 
-iLink tokens are valid for 24 hours. `errcode: -14` in `getupdates` response indicates expiry and triggers QR re-login.
+The WeChat iLink connection may return `errcode: -14` on temporary session timeout. The client sleeps 600s and retries automatically — QR authorization is long-term and does not require re-scanning.
 
 ## License
 

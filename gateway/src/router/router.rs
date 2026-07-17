@@ -8,7 +8,9 @@
 use crate::agents::queue::MessageQueue;
 use crate::agents::registry::AgentRegistry;
 use crate::error::{GatewayError, Result};
-use crate::ilink::types::{msg_type, AgentMessage, QueuedMessage, RouterCommand, WeixinMessage};
+use crate::ilink::types::{
+    msg_type, AgentMessage, MediaItem, QueuedMessage, RouterCommand, WeixinMessage,
+};
 use crate::router::commands::{execute_command, is_dangerous_command, parse_command};
 
 /// Central message router that coordinates message handling.
@@ -79,6 +81,7 @@ impl Router {
             GatewayError::Command("Failed to convert message for agent delivery".to_string())
         })?;
 
+        let media = agent_msg.media.clone();
         let queued = QueuedMessage {
             id: agent_msg.id,
             from_user: agent_msg.from_user,
@@ -87,6 +90,7 @@ impl Router {
             context_token: agent_msg.context_token,
             message_type: agent_msg.message_type,
             delivered: false,
+            media,
         };
 
         self.queue.enqueue(active, queued)?;
@@ -162,7 +166,7 @@ impl Router {
 
     /// Convert a WeixinMessage to a canonical AgentMessage for agent delivery.
     pub fn to_agent_message(msg: &WeixinMessage) -> Option<AgentMessage> {
-        let text = msg.text()?;
+        let text = msg.text().unwrap_or("");
         let item_type = msg
             .item_list
             .as_ref()?
@@ -178,6 +182,8 @@ impl Router {
             _ => "unknown",
         };
 
+        let media = Self::extract_media_info(msg);
+
         Some(AgentMessage {
             id: msg.message_id.map(|id| id.to_string()).unwrap_or_default(),
             from_user: msg.from_user_id.clone().unwrap_or_default(),
@@ -185,7 +191,68 @@ impl Router {
             timestamp: msg.create_time_ms.unwrap_or(0),
             context_token: msg.context_token.clone().unwrap_or_default(),
             message_type: message_type.to_string(),
+            media,
         })
+    }
+
+    /// Extract media information from a WeixinMessage's item list.
+    ///
+    /// Returns a vec with zero or one `MediaItem` depending on whether the
+    /// first item in the list is a media type (image, voice, video, or file).
+    pub fn extract_media_info(msg: &WeixinMessage) -> Vec<MediaItem> {
+        let item = match msg.item_list.as_ref().and_then(|items| items.first()) {
+            Some(item) => item,
+            None => return vec![],
+        };
+
+        let item_type = item.item_type.unwrap_or(msg_type::TEXT);
+        match item_type {
+            msg_type::IMAGE => {
+                if let Some(ref img) = item.image_item {
+                    vec![MediaItem {
+                        media_type: "image".to_string(),
+                        local_path: String::new(),
+                        original_name: img.md5.clone(),
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            msg_type::VOICE => {
+                if item.voice_item.is_some() {
+                    vec![MediaItem {
+                        media_type: "voice".to_string(),
+                        local_path: String::new(),
+                        original_name: None,
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            msg_type::VIDEO => {
+                if let Some(ref video) = item.video_item {
+                    vec![MediaItem {
+                        media_type: "video".to_string(),
+                        local_path: String::new(),
+                        original_name: video.md5.clone(),
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            msg_type::FILE => {
+                if let Some(ref file) = item.file_item {
+                    vec![MediaItem {
+                        media_type: "file".to_string(),
+                        local_path: String::new(),
+                        original_name: file.file_name.clone(),
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        }
     }
 
     /// Get a reference to the registry.
@@ -207,6 +274,8 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ilink::types::{FileItem, ImageItem, VideoItem, VoiceItem};
+    use crate::ilink::types::MessageItem;
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -382,6 +451,145 @@ mod tests {
     fn test_to_agent_message_returns_none_for_empty_message() {
         let msg = WeixinMessage::default();
         assert!(Router::to_agent_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_extract_media_info_image_returns_media_item() {
+        let msg = WeixinMessage {
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::IMAGE),
+                image_item: Some(ImageItem {
+                    cdn_url: Some("https://cdn.weixin.qq.com/img".to_string()),
+                    md5: Some("abc123".to_string()),
+                    aes_key: Some("aes-key-123".to_string()),
+                    encrypt_query_param: Some("enc=xyz".to_string()),
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let media = Router::extract_media_info(&msg);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].media_type, "image");
+        assert!(media[0].local_path.is_empty());
+        assert_eq!(media[0].original_name.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_extract_media_info_voice_returns_media_item() {
+        let msg = WeixinMessage {
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::VOICE),
+                voice_item: Some(VoiceItem {
+                    cdn_url: Some("https://cdn.weixin.qq.com/voice".to_string()),
+                    aes_key: Some("v-aes-key".to_string()),
+                    encrypt_query_param: Some("enc=abc".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let media = Router::extract_media_info(&msg);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].media_type, "voice");
+        assert!(media[0].local_path.is_empty());
+        assert!(media[0].original_name.is_none());
+    }
+
+    #[test]
+    fn test_extract_media_info_video_returns_media_item() {
+        let msg = WeixinMessage {
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::VIDEO),
+                video_item: Some(VideoItem {
+                    cdn_url: Some("https://cdn.weixin.qq.com/video".to_string()),
+                    aes_key: Some("vid-aes".to_string()),
+                    encrypt_query_param: Some("enc=vid".to_string()),
+                    md5: Some("md5-video".to_string()),
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let media = Router::extract_media_info(&msg);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].media_type, "video");
+        assert_eq!(media[0].original_name.as_deref(), Some("md5-video"));
+    }
+
+    #[test]
+    fn test_extract_media_info_file_returns_media_item() {
+        let msg = WeixinMessage {
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::FILE),
+                file_item: Some(FileItem {
+                    file_name: Some("document.pdf".to_string()),
+                    file_size: Some(1024),
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let media = Router::extract_media_info(&msg);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].media_type, "file");
+        assert_eq!(
+            media[0].original_name.as_deref(),
+            Some("document.pdf")
+        );
+    }
+
+    #[test]
+    fn test_extract_media_info_text_returns_empty() {
+        let msg = make_text_msg("hello");
+        let media = Router::extract_media_info(&msg);
+        assert!(media.is_empty());
+    }
+
+    #[test]
+    fn test_extract_media_info_empty_item_list() {
+        let msg = WeixinMessage::default();
+        let media = Router::extract_media_info(&msg);
+        assert!(media.is_empty());
+    }
+
+    #[test]
+    fn test_extract_media_info_missing_item_data_returns_empty() {
+        // IMAGE type but no image_item
+        let msg = WeixinMessage {
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::IMAGE),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let media = Router::extract_media_info(&msg);
+        assert!(media.is_empty());
+    }
+
+    #[test]
+    fn test_to_agent_message_with_image_includes_media() {
+        let msg = WeixinMessage {
+            message_id: Some(99),
+            from_user_id: Some("user@wx".to_string()),
+            context_token: Some("ctx-img".to_string()),
+            message_type: Some(crate::ilink::types::chat_type::USER),
+            item_list: Some(vec![MessageItem {
+                item_type: Some(msg_type::IMAGE),
+                image_item: Some(ImageItem {
+                    md5: Some("img-md5".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let agent_msg = Router::to_agent_message(&msg).unwrap();
+        assert_eq!(agent_msg.message_type, "image");
+        assert_eq!(agent_msg.text, "");
+        assert_eq!(agent_msg.media.len(), 1);
+        assert_eq!(agent_msg.media[0].media_type, "image");
     }
 
     #[test]

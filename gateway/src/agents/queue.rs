@@ -90,6 +90,7 @@ fn make_msg(id: &str, text: &str) -> QueuedMessage {
         context_token: "ctx-123".to_string(),
         message_type: "text".to_string(),
         delivered: false,
+        media: vec![],
     }
 }
 

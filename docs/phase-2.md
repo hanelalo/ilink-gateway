@@ -2,11 +2,11 @@
 
 ## 概述
 
-Phase 1 实现了完整的功能骨架（iLink 协议、Agent 注册、消息路由、指令系统、Hermes ACP 客户端），Phase 2 补全四个缺失的关键功能。
+Phase 1 实现了完整的功能骨架（iLink 协议、Agent 注册、消息路由、指令系统、Hermes ACP 客户端），Phase 2 补全三个缺失的关键功能。
 
 ---
 
-## 1. Agent 心跳检测
+## 1. Agent 心跳检测 ✅
 
 ### 问题
 
@@ -39,123 +39,28 @@ Gateway 负责检测心跳超时，而不是 agent 主动发心跳（简化 agen
 
 ---
 
-## 2. 24h 自动重连
-
-### 问题
-
-iLink token 有效期 24 小时，过期后 `getupdates` 返回 `errcode: -14`。当前 main.rs 检测到 -14 就会立即重扫码，但最佳体验应该是在到期前主动预警、让用户选择是否重连、或在到期前完成无缝切换。
-
-### 方案
-
-参考 weixin-ClawBot-API 的 24h 自动重连机制：
-
-1. **token 到期前的主动预警**（剩余 ~2h 时）：
-   - 向活跃的微信用户发送消息："⚠️ 微信连接将在 2 小时后过期，回复 Y 立即重新连接，回复 N 稍后提醒"
-   - 用户回复 Y → 获取新二维码 → 用户扫码 → token 原子替换
-   - 用户回复 N → 30 分钟后再次提醒
-   - 最后 30 分钟 → 强制重连，无需确认
-
-2. **技术实现**：
-   - `main.rs` 的 poll loop 旁启动一个 `reconnect_timer` 异步任务
-   - 记录 `login_time`，用 `ArcSwap<String>` 存储 token（原子替换）
-   - 重连期间旧 token 继续工作，新 token 扫码成功后 `getupdates` 自动用新 token
-   - 重连过程有重入守卫（防止多个重连同时进行）
-
-3. **扫码到一半 token 过期**：
-   - 当前 `main.rs` 在 `getupdates` 返回 -14 时立即触发重扫码
-   - 把这个逻辑改为兜底：如果主动预警流程走不通（用户没看到、没回复），最后的保障就是 -14 被动触发重连
-
-### 涉及模块
-
-| 模块 | 变更 |
-|------|------|
-| `gateway/src/main.rs` | 新增 `start_reconnect_timer()` 异步任务，`send_wechat_message()` 工具函数 |
-| `gateway/src/ilink/client.rs` | 无变更（已有 `get_qr_code` / `poll_qr_status` / `send_message`） |
-| `gateway/src/storage/sqlite_store.rs` | 无变更（已有 `save_credentials`） |
-
-### 配置项（新增环境变量）
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `GW_SESSION_DURATION` | `86400` | token 有效期（秒），默认 24h |
-| `GW_RECONNECT_WARNING_BEFORE` | `7200` | 提前多久预警（秒），默认 2h |
-| `GW_RECONNECT_REMINDER_INTERVAL` | `1800` | 用户拖延后再次提醒间隔（秒），默认 30min |
-| `GW_RECONNECT_FORCE_BEFORE` | `1800` | 强制重连阈值（秒），默认 30min |
-
-### 测试
-
-- 模拟 `login_time` 接近到期 → 预警消息发送
-- 模拟用户回复 Y → 重扫码流程触发
-- 模拟用户回复 N → 计时器重置，下次再问
-- 模拟 -14 被动触发 → 兜底重连
-- 重连期间旧 token 仍能发消息
-
----
-
-## 3. 媒体文件收发
+## 2. 媒体文件收发 ✅
 
 ### 问题
 
 当前只支持纯文本消息。iLink 协议支持图片（type=2）、语音（type=3）、文件（type=4）、视频（type=5），但需要 AES-128-ECB 加密/解密以及 CDN 上传/下载。
 
-### 方案
+### 已实现
 
-参考 Hermes `weixin.py` 和 iLink Hub `upstream.rs` 的实现：
+- **类型定义** — `MediaItem`、`VideoItem`、`GetUploadUrlRequest/Response`，扩展 `ImageItem`/`VoiceItem` 增加 `encrypt_query_param`/`aes_key`
+- **AES-128-ECB 模块** — `ilink/media.rs`，PKCS7 padding 加解密
+- **CDN 下载** — `ilink/download.rs`，SSRF 防护（只允许 `*.cdn.weixin.qq.com`）
+- **媒体提取** — `Router::extract_media_info()` 解析图片/语音/视频/文件 item
+- **回复路径** — agent 回复带 `media_paths`，通过 channel 异步处理
+- **get_upload_url** — `ilink/client.rs`，获取 CDN 上传地址
 
-**接收媒体消息：**
-1. `getupdates` 返回的 `item_list` 中包含媒体类型的 item
-2. 根据 `type` 判断媒体类型，提取 `encrypt_query_param`（或 `full_url`）+ `aes_key`
-3. 如果是 `encrypt_query_param`：构造 CDN URL 下载 → AES-128-ECB 解密 → 保存到本地缓存
-4. 如果是 `full_url`：直接下载（需校验 CDN URL 白名单防 SSRF）→ 保存到本地缓存
-5. 将本地文件路径放入 `AgentMessage` 的 `media_paths` 字段（需要先扩展 `AgentMessage` 和 `QueuedMessage`）
+### 待完成（后续迭代）
 
-**发送媒体消息：**
-1. agent 回复时附带 `media_paths: ["/tmp/image.png"]`
-2. gateway 读取文件 → `getuploadurl` 获取上传地址 → AES-128-ECB 加密 → 上传 CDN
-3. 构造媒体类型的 `sendmessage` 请求体（包含 `encrypt_query_param`、`aes_key` 等）
-
-**AES-128-ECB 加密/解密：**
-```rust
-fn aes128_ecb_encrypt(plaintext: &[u8], key: &[u8]) -> Vec<u8> {
-    // PKCS7 padding + AES-128-ECB encrypt
-}
-fn aes128_ecb_decrypt(ciphertext: &[u8], key: &[u8]) -> Vec<u8> {
-    // AES-128-ECB decrypt + PKCS7 unpad
-}
-```
-
-需要新增依赖 `aes` crate 或使用 `cryptography` 的 Rust 绑定。也可以参考 iLink Hub 的实现方式。
-
-### 涉及模块
-
-| 模块 | 变更 |
-|------|------|
-| `gateway/src/ilink/types.rs` | 扩展 `AgentMessage` 和 `QueuedMessage` 增加 `media_paths` 字段；文件接收/发送类型的 serde 确认 |
-| `gateway/src/ilink/client.rs` | 新增 `get_upload_url()`，新增 `upload_media()` 方法；新增 `download_media()` 方法 |
-| `gateway/src/ilink/media.rs` | **新文件** — AES-128-ECB 加密/解密工具函数，CDN URL 构建 |
-| `gateway/src/router/router.rs` | `handle_incoming` 处理媒体消息时提取媒体信息 |
-| `gateway/Cargo.toml` | 新增 `aes` 或 `crypto-common` 依赖 |
-
-### 媒体文件类型
-
-| type | 含义 | 入站处理 | 出站处理 |
-|------|------|----------|----------|
-| 2 | 图片 | CDN 下载 → AES 解密 → 缓存 `.jpg` | 读文件 → AES 加密 → CDN 上传 → send |
-| 3 | 语音（silk） | CDN 下载 → AES 解密 → 缓存 `.silk` | 同文件流程 |
-| 4 | 文件 | CDN 下载 → AES 解密 → 缓存 | 同文件流程 |
-| 5 | 视频 | CDN 下载 → AES 解密 → 缓存 `.mp4` | 同文件流程 |
-
-### 测试
-
-- AES-128-ECB 加密/解密向量测试（固定 key/plaintext 验证结果）
-- CDN URL 白名单校验（允许/拒绝）
-- `getuploadurl` 请求/响应序列化
-- 媒体消息解析（从 mock getupdates 响应中提取媒体信息）
-- SSRF 防护测试（拒绝非微信 CDN 域名）
+- 完整的 CDN 加密上传 → 构造媒体 sendmessage 流程（目前 media_paths 回复发文本提示）
 
 ---
 
-## 4. WebSocket 推送
+## 3. WebSocket 推送
 
 ### 问题
 
@@ -211,9 +116,8 @@ fn aes128_ecb_decrypt(ciphertext: &[u8], key: &[u8]) -> Vec<u8> {
 
 ## 实现优先级
 
-1. **Agent 心跳检测** — 最简单，改动最小，不影响其他功能
-2. **24h 自动重连** — 核心体验问题，生产必须
-3. **媒体文件收发** — 功能完整性的关键缺口，但技术复杂度较高
-4. **WebSocket 推送** — 性能优化，优先级最低
+1. **Agent 心跳检测** — ✅ 已完成
+2. **媒体文件收发** — 功能完整性的关键缺口，但技术复杂度较高
+3. **WebSocket 推送** — 性能优化，优先级最低
 
-建议按 1 → 2 → 3 → 4 的顺序实现。
+建议按 1 → 2 → 3 的顺序实现。

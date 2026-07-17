@@ -16,10 +16,11 @@ use axum::{
     routing::{get, post},
 };
 use serde::Deserialize;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::GatewayConfig;
 use crate::error::Result;
-use crate::ilink::types::AgentStatus;
+use crate::ilink::types::{AgentReply, AgentStatus};
 use crate::router::router::Router as InternalRouter;
 
 // ─── Request types ──────────────────────────────────────────────────────────
@@ -35,6 +36,8 @@ pub struct RegisterRequest {
 pub struct ReplyRequest {
     pub reply_to_id: String,
     pub text: String,
+    #[serde(default)]
+    pub media_paths: Vec<String>,
 }
 
 // ─── Application state ──────────────────────────────────────────────────────
@@ -42,6 +45,7 @@ pub struct ReplyRequest {
 #[derive(Clone)]
 pub struct AppState {
     pub router: Arc<Mutex<InternalRouter>>,
+    pub reply_tx: UnboundedSender<AgentReply>,
 }
 
 // ─── Router builder ─────────────────────────────────────────────────────────
@@ -134,6 +138,17 @@ pub async fn handle_poll(
     let agent_msgs: Vec<serde_json::Value> = messages
         .into_iter()
         .map(|m| {
+            let media: Vec<serde_json::Value> = m
+                .media
+                .into_iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "media_type": item.media_type,
+                        "local_path": item.local_path,
+                        "original_name": item.original_name,
+                    })
+                })
+                .collect();
             serde_json::json!({
                 "id": m.id,
                 "from_user": m.from_user,
@@ -141,6 +156,7 @@ pub async fn handle_poll(
                 "timestamp": m.timestamp,
                 "context_token": m.context_token,
                 "message_type": m.message_type,
+                "media": media,
             })
         })
         .collect();
@@ -155,12 +171,20 @@ pub async fn handle_poll(
 ///
 /// The reply is acknowledged here. Actual sending via iLink happens in main.rs
 /// when the iLink client is available.
-#[allow(unused_variables)]
 pub async fn handle_reply(
     State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
+    Path(_name): Path<String>,
     Json(body): Json<ReplyRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Send reply through channel
+    let reply = AgentReply {
+        reply_to_id: body.reply_to_id,
+        text: body.text,
+        media_paths: body.media_paths,
+    };
+    if state.reply_tx.send(reply).is_err() {
+        tracing::warn!("reply channel closed, dropping reply");
+    }
     (
         StatusCode::OK,
         Json(serde_json::json!({"ok": true})),
@@ -212,11 +236,13 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_state() -> AppState {
+        let (reply_tx, _) = tokio::sync::mpsc::unbounded_channel();
         AppState {
             router: Arc::new(Mutex::new(InternalRouter::new(
                 crate::agents::registry::AgentRegistry::new(),
                 crate::agents::queue::MessageQueue::new(),
             ))),
+            reply_tx,
         }
     }
 
@@ -315,6 +341,33 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_reply_sends_through_channel() {
+        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(AppState {
+            router: Arc::new(Mutex::new(InternalRouter::new(
+                crate::agents::registry::AgentRegistry::new(),
+                crate::agents::queue::MessageQueue::new(),
+            ))),
+            reply_tx,
+        });
+
+        let (_status, _json) = post_json(&state, "/api/agents/hermes/reply", serde_json::json!({
+            "reply_to_id": "msg-1",
+            "text": "hello back",
+            "media_paths": ["/tmp/file.pdf"],
+        }))
+        .await;
+
+        // Verify the reply was sent through the channel
+        let reply = reply_rx
+            .try_recv()
+            .expect("should have received a reply on channel");
+        assert_eq!(reply.reply_to_id, "msg-1");
+        assert_eq!(reply.text, "hello back");
+        assert_eq!(reply.media_paths, vec!["/tmp/file.pdf"]);
     }
 
     #[tokio::test]

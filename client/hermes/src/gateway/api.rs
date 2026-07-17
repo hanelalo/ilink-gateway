@@ -17,6 +17,15 @@ pub struct GatewayMessage {
     pub timestamp: i64,
     pub context_token: String,
     pub message_type: String,
+    #[serde(default)]
+    pub media: Vec<GatewayMediaItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayMediaItem {
+    pub media_type: String,
+    pub local_path: String,
+    pub original_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +44,8 @@ struct PollResponse {
 struct ReplyRequest {
     reply_to_id: String,
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    media_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +187,7 @@ impl GatewayClient {
         let body = ReplyRequest {
             reply_to_id: reply_to_id.to_string(),
             text: text.to_string(),
+            media_paths: vec![],
         };
 
         let resp = self

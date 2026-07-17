@@ -43,7 +43,30 @@ pub struct QrcodeStatusResponse {
     pub errmsg: Option<String>,
 }
 
-// ── Message Items ────────────────────────────────────────────────────────────
+// ── CDN Upload ─────────────────────────────────────────────────────────
+
+/// CDN upload response (POST /ilink/bot/getuploadurl)
+#[derive(Debug, Deserialize)]
+pub struct GetUploadUrlResponse {
+    pub ret: i32,
+    pub cdnurl: Option<String>,
+    pub aes_key: Option<String>,
+    pub errmsg: Option<String>,
+}
+
+/// Upload request
+#[derive(Debug, Serialize)]
+pub struct GetUploadUrlRequest {
+    pub aes_key: String,
+    #[serde(rename = "type")]
+    pub item_type: i32,
+    pub file_size: i64,
+    pub file_md5: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_info: Option<BaseInfo>,
+}
+
+// ── Message Items ────────────────────────────────────────────────────────
 
 pub mod msg_type {
     pub const TEXT: i32 = 1;
@@ -74,6 +97,12 @@ pub struct TextItem {
 pub struct VoiceItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypt_query_param: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -84,6 +113,8 @@ pub struct ImageItem {
     pub md5: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aes_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypt_query_param: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,6 +123,18 @@ pub struct FileItem {
     pub file_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VideoItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypt_query_param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -106,6 +149,8 @@ pub struct MessageItem {
     pub image_item: Option<ImageItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_item: Option<FileItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_item: Option<VideoItem>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
@@ -175,6 +220,69 @@ impl WeixinMessage {
                 text_item: Some(TextItem { text: Some(text) }),
                 ..Default::default()
             }]),
+            ..Default::default()
+        }
+    }
+
+    /// Build a media reply with an encrypted CDN URL.
+    ///
+    /// Used when an agent sends back a media message (image, voice, video, or file).
+    /// The `text` goes into `text_item` and, for file type, also into `file_item.file_name`.
+    pub fn build_media_reply(
+        context_token: String,
+        to_user: String,
+        text: String,
+        item_type: i32,
+        encrypt_query_param: String,
+        aes_key: String,
+    ) -> Self {
+        let mut item = MessageItem {
+            item_type: Some(item_type),
+            text_item: Some(TextItem {
+                text: Some(text.clone()),
+            }),
+            ..Default::default()
+        };
+
+        match item_type {
+            msg_type::IMAGE => {
+                item.image_item = Some(ImageItem {
+                    encrypt_query_param: Some(encrypt_query_param),
+                    aes_key: Some(aes_key),
+                    ..Default::default()
+                });
+            }
+            msg_type::VOICE => {
+                item.voice_item = Some(VoiceItem {
+                    encrypt_query_param: Some(encrypt_query_param),
+                    aes_key: Some(aes_key),
+                    ..Default::default()
+                });
+            }
+            msg_type::VIDEO => {
+                item.video_item = Some(VideoItem {
+                    encrypt_query_param: Some(encrypt_query_param),
+                    aes_key: Some(aes_key),
+                    ..Default::default()
+                });
+            }
+            msg_type::FILE => {
+                item.file_item = Some(FileItem {
+                    file_name: Some(text),
+                    ..Default::default()
+                });
+            }
+            _ => {}
+        }
+
+        WeixinMessage {
+            context_token: Some(context_token),
+            to_user_id: Some(to_user),
+            message_type: Some(chat_type::BOT),
+            message_state: Some(message_state::FINISH),
+            from_user_id: Some(String::new()),
+            client_id: Some(new_client_id()),
+            item_list: Some(vec![item]),
             ..Default::default()
         }
     }
@@ -260,6 +368,14 @@ pub struct GetConfigResponse {
 
 // ── Agent-facing types (gateway internal) ────────────────────────────────────
 
+/// Media attachment (agent-facing, serialized to JSON for poll API)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaItem {
+    pub media_type: String, // "image" | "voice" | "file" | "video"
+    pub local_path: String, // path to locally cached file
+    pub original_name: Option<String>, // file name (for file type)
+}
+
 /// A normalized message from WeChat that agents receive.
 /// This is the canonical format—agents see this, not the raw iLink JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +386,8 @@ pub struct AgentMessage {
     pub timestamp: i64,
     pub context_token: String,
     pub message_type: String, // "text" | "image" | "voice" | "file"
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<MediaItem>,
 }
 
 /// An agent's reply to a WeChat message.
@@ -277,6 +395,8 @@ pub struct AgentMessage {
 pub struct AgentReply {
     pub reply_to_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_paths: Vec<String>,
 }
 
 /// Status of a registered agent.
@@ -307,6 +427,7 @@ pub struct QueuedMessage {
     pub context_token: String,
     pub message_type: String,
     pub delivered: bool,
+    pub media: Vec<MediaItem>,
 }
 
 /// Router command types.
@@ -360,6 +481,7 @@ mod tests {
                 item_type: Some(msg_type::VOICE),
                 voice_item: Some(VoiceItem {
                     text: Some("语音转文字".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }]),
@@ -413,11 +535,13 @@ mod tests {
             timestamp: 1700000000,
             context_token: "token-abc".to_string(),
             message_type: "text".to_string(),
+            media: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: AgentMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, "msg-1");
         assert_eq!(deserialized.from_user, "user@wx");
+        assert!(deserialized.media.is_empty());
     }
 
     #[test]
@@ -425,10 +549,162 @@ mod tests {
         let reply = AgentReply {
             reply_to_id: "msg-1".to_string(),
             text: "hello back".to_string(),
+            media_paths: vec![],
         };
         let json = serde_json::to_string(&reply).unwrap();
         let deserialized: AgentReply = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.reply_to_id, "msg-1");
+    }
+
+    #[test]
+    fn test_agent_message_with_media_serialization() {
+        let msg = AgentMessage {
+            id: "msg-1".to_string(),
+            from_user: "user@wx".to_string(),
+            text: "check this image".to_string(),
+            timestamp: 1700000000,
+            context_token: "token-abc".to_string(),
+            message_type: "image".to_string(),
+            media: vec![MediaItem {
+                media_type: "image".to_string(),
+                local_path: "/tmp/cache/abc.jpg".to_string(),
+                original_name: None,
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("media"));
+        assert!(json.contains("abc.jpg"));
+        let deserialized: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.media.len(), 1);
+        assert_eq!(deserialized.media[0].media_type, "image");
+    }
+
+    #[test]
+    fn test_agent_message_empty_media_omitted() {
+        let msg = AgentMessage {
+            id: "msg-1".to_string(),
+            from_user: "user@wx".to_string(),
+            text: "hello".to_string(),
+            timestamp: 1700000000,
+            context_token: "token-abc".to_string(),
+            message_type: "text".to_string(),
+            media: vec![],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // media field should not appear in JSON when empty
+        assert!(!json.contains("media"));
+    }
+
+    #[test]
+    fn test_agent_reply_with_media_paths_serialization() {
+        let reply = AgentReply {
+            reply_to_id: "msg-1".to_string(),
+            text: "here is a file".to_string(),
+            media_paths: vec!["/tmp/file.pdf".to_string()],
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains("media_paths"));
+        assert!(json.contains("file.pdf"));
+        let deserialized: AgentReply = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.media_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_agent_reply_empty_media_paths_omitted() {
+        let reply = AgentReply {
+            reply_to_id: "msg-1".to_string(),
+            text: "hello".to_string(),
+            media_paths: vec![],
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(!json.contains("media_paths"));
+    }
+
+    #[test]
+    fn test_get_upload_url_request_serialization() {
+        let req = GetUploadUrlRequest {
+            aes_key: "test-aes-key".to_string(),
+            item_type: 2,
+            file_size: 1024,
+            file_md5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            base_info: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("test-aes-key"));
+        assert!(json.contains(r#""type":2"#));
+        assert!(json.contains("file_size"));
+        assert!(json.contains("1024"));
+        assert!(json.contains("file_md5"));
+    }
+
+    #[test]
+    fn test_get_upload_url_response_deserialization() {
+        let json = r#"{"ret":0,"cdnurl":"https://cdn.weixin.qq.com/upload","aes_key":"key123","errmsg":"ok"}"#;
+        let resp: GetUploadUrlResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.ret, 0);
+        assert_eq!(resp.cdnurl.as_deref(), Some("https://cdn.weixin.qq.com/upload"));
+        assert_eq!(resp.aes_key.as_deref(), Some("key123"));
+    }
+
+    #[test]
+    fn test_get_upload_url_response_partial() {
+        // Some fields may be absent on error responses
+        let json = r#"{"ret":-1,"errmsg":"invalid param"}"#;
+        let resp: GetUploadUrlResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.ret, -1);
+        assert!(resp.cdnurl.is_none());
+        assert!(resp.aes_key.is_none());
+    }
+
+    #[test]
+    fn test_video_item_serialization() {
+        let item = VideoItem {
+            cdn_url: Some("https://cdn.weixin.qq.com/video".to_string()),
+            aes_key: Some("aes-key-123".to_string()),
+            encrypt_query_param: Some("enc=abc".to_string()),
+            md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_string()),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("cdn_url"));
+        assert!(json.contains("aes_key"));
+        assert!(json.contains("encrypt_query_param"));
+        assert!(json.contains("md5"));
+        let deserialized: VideoItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.cdn_url.as_deref(), Some("https://cdn.weixin.qq.com/video"));
+    }
+
+    #[test]
+    fn test_video_item_default() {
+        let item = VideoItem::default();
+        let json = serde_json::to_string(&item).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn test_message_item_with_video_deserialization() {
+        let json = r#"{
+            "type": 5,
+            "video_item": {
+                "cdn_url": "https://cdn.weixin.qq.com/video",
+                "aes_key": "key123",
+                "encrypt_query_param": "enc=abc",
+                "md5": "d41d8cd98f00b204e9800998ecf8427e"
+            }
+        }"#;
+        let item: MessageItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.item_type, Some(5));
+        let video = item.video_item.unwrap();
+        assert_eq!(video.cdn_url.as_deref(), Some("https://cdn.weixin.qq.com/video"));
+        assert_eq!(video.aes_key.as_deref(), Some("key123"));
+    }
+
+    #[test]
+    fn test_message_item_without_video() {
+        let item = MessageItem {
+            item_type: Some(msg_type::TEXT),
+            ..Default::default()
+        };
+        assert!(item.video_item.is_none());
     }
 
     #[test]
@@ -497,5 +773,89 @@ mod tests {
         let id = new_client_id();
         assert!(id.starts_with("wechat-gw:"));
         assert_eq!(id.len(), 46); // "wechat-gw:" (10) + UUID (36)
+    }
+
+    #[test]
+    fn test_build_media_reply_image_sets_encrypt_and_aes() {
+        let msg = WeixinMessage::build_media_reply(
+            "ctx-img".to_string(),
+            "user@wx".to_string(),
+            String::new(),
+            msg_type::IMAGE,
+            "enc=abc123".to_string(),
+            "aes-key-456".to_string(),
+        );
+        assert_eq!(msg.message_type, Some(chat_type::BOT));
+        assert_eq!(msg.message_state, Some(message_state::FINISH));
+        assert_eq!(msg.to_user_id.as_deref(), Some("user@wx"));
+
+        let items = msg.item_list.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_type, Some(msg_type::IMAGE));
+
+        let img = items[0].image_item.as_ref().unwrap();
+        assert_eq!(
+            img.encrypt_query_param.as_deref(),
+            Some("enc=abc123")
+        );
+        assert_eq!(img.aes_key.as_deref(), Some("aes-key-456"));
+    }
+
+    #[test]
+    fn test_build_media_reply_video_sets_fields() {
+        let msg = WeixinMessage::build_media_reply(
+            "ctx-vid".to_string(),
+            "user@wx".to_string(),
+            String::new(),
+            msg_type::VIDEO,
+            "enc=video123".to_string(),
+            "vid-aes-key".to_string(),
+        );
+        let items = msg.item_list.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_type, Some(msg_type::VIDEO));
+
+        let video = items[0].video_item.as_ref().unwrap();
+        assert_eq!(
+            video.encrypt_query_param.as_deref(),
+            Some("enc=video123")
+        );
+        assert_eq!(video.aes_key.as_deref(), Some("vid-aes-key"));
+    }
+
+    #[test]
+    fn test_build_media_reply_file_sets_file_name() {
+        let msg = WeixinMessage::build_media_reply(
+            "ctx-file".to_string(),
+            "user@wx".to_string(),
+            "report.pdf".to_string(),
+            msg_type::FILE,
+            String::new(),
+            String::new(),
+        );
+        let items = msg.item_list.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_type, Some(msg_type::FILE));
+
+        let file = items[0].file_item.as_ref().unwrap();
+        assert_eq!(file.file_name.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn test_build_media_reply_voice_sets_fields() {
+        let msg = WeixinMessage::build_media_reply(
+            "ctx-voice".to_string(),
+            "user@wx".to_string(),
+            String::new(),
+            msg_type::VOICE,
+            "enc=voice".to_string(),
+            "voice-aes".to_string(),
+        );
+        let items = msg.item_list.unwrap();
+        assert_eq!(items[0].item_type, Some(msg_type::VOICE));
+
+        let voice = items[0].voice_item.as_ref().unwrap();
+        assert_eq!(voice.encrypt_query_param.as_deref(), Some("enc=voice"));
+        assert_eq!(voice.aes_key.as_deref(), Some("voice-aes"));
     }
 }

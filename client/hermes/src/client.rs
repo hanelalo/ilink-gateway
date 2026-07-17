@@ -290,6 +290,7 @@ mod tests {
             timestamp: 1700000000,
             context_token: "ctx-abc".to_string(),
             message_type: "text".to_string(),
+            media: vec![],
         };
 
         let json = serde_json::to_string(&msg).unwrap();
