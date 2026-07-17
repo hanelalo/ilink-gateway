@@ -56,7 +56,10 @@ async fn main() -> Result<()> {
     // 1. Load config from environment
     let config = GatewayConfig::from_env()?;
 
-    // 2. Initialize tracing
+    // 2b. Extract cdn_base (trim /c2c since build_cdn_download_url adds it)
+    let cdn_base = config.cdn_base_url.trim_end_matches("/c2c").to_string();
+
+    // 3. Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -65,6 +68,16 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("starting wechat-gateway");
+
+    // 2c. Shutdown coordination (Ctrl+C / SIGTERM)
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // 2d. Signal handler — listens for Ctrl+C and triggers graceful shutdown
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("received Ctrl+C, shutting down gracefully...");
+        let _ = shutdown_tx.send(true);
+    });
 
     // 3. Open SQLite store (expand `~` in the db path)
     let db_path = expand_tilde(&config.db_path);
@@ -134,15 +147,20 @@ async fn main() -> Result<()> {
         });
     }
 
-    // 8. Spawn the HTTP API server
+    // 8. Spawn the HTTP API server with graceful shutdown
     let server_config = config.clone();
     let server_state = AppState {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
         ws_registry: ws_registry.clone(),
     };
+    let server_shutdown_rx = shutdown_rx.clone();
+    let server_signal = async move {
+        let mut rx = server_shutdown_rx;
+        let _ = rx.changed().await;
+    };
     tokio::spawn(async move {
-        if let Err(e) = start_server(&server_config, server_state).await {
+        if let Err(e) = start_server(&server_config, server_state, server_signal).await {
             tracing::error!("HTTP server error: {e}");
         }
     });
@@ -151,121 +169,132 @@ async fn main() -> Result<()> {
         "gateway started — entering long-poll loop (target: {base_url})"
     );
 
-    // 9. Main long-poll loop
+    // 9. Main long-poll loop with graceful shutdown
     let mut sync_buf = String::new();
     let current_token = token;
     let _current_base_url = base_url;
 
     loop {
-        let resp = match client.get_updates(&sync_buf, Some(35)).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("get_updates error: {e}");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                continue;
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                tracing::info!("shutdown signal received, exiting long-poll loop");
+                // Give pending replies a moment to send before the server stops
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                break Ok(());
             }
-        };
+            result = client.get_updates(&sync_buf, Some(35)) => {
+                let resp = match result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!("get_updates error: {e}");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
 
-        // Handle errcode -14 (session timeout — temporary, not credential expiry).
-        // Sleep and retry; iLink sessions recover on their own.
-        if resp.errcode == Some(-14) {
-            tracing::warn!("session timed out (errcode=-14); pausing 600s before retry");
-            sync_buf = String::new();
-            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-            continue;
-        }
-
-        sync_buf = resp.get_updates_buf.unwrap_or(sync_buf);
-
-        if let Some(msgs) = resp.msgs {
-            for msg in msgs {
-                // Skip non-user messages
-                if !msg.is_user_message() {
+                // Handle errcode -14 (session timeout — temporary, not credential expiry).
+                // Sleep and retry; iLink sessions recover on their own.
+                if resp.errcode == Some(-14) {
+                    tracing::warn!("session timed out (errcode=-14); pausing 600s before retry");
+                    sync_buf = String::new();
+                    tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
                     continue;
                 }
 
-                let (reply_text, active_agent) = {
-                    let mut router_guard = router_arc.lock().unwrap();
-                    let active = router_guard.active_agent().map(|s| s.to_string());
-                    let reply = router_guard.handle_incoming(&msg).unwrap_or_else(|e| {
-                        Some(format!("Error processing message: {e}"))
-                    });
-                    (reply, active)
-                };
+                sync_buf = resp.get_updates_buf.unwrap_or(sync_buf);
 
-                if let Some(text) = reply_text {
-                    let context_token = msg.context_token.unwrap_or_default();
-                    let to_user = msg.from_user_id.unwrap_or_default();
-
-                    let reply = crate::ilink::types::WeixinMessage::build_text_reply(
-                        context_token,
-                        to_user,
-                        text,
-                    );
-                    let send_req = SendMessageRequest {
-                        msg: reply,
-                        base_info: None,
-                    };
-
-                    if let Err(e) = client.send_message(&current_token, &send_req).await {
-                        tracing::warn!("send_message error: {e}");
-                    }
-                } else {
-                    // Message was routed to agent queue — record context for reply lookup
-                    if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
-                        if let (Some(ctx), Some(user)) =
-                            (msg.context_token.clone(), msg.from_user_id.clone())
-                        {
-                            message_contexts.lock().unwrap().insert(
-                                msg_id.clone(),
-                                MessageContextInfo {
-                                    context_token: ctx,
-                                    to_user: user,
-                                },
-                            );
+                if let Some(msgs) = resp.msgs {
+                    for msg in msgs {
+                        // Skip non-user messages
+                        if !msg.is_user_message() {
+                            continue;
                         }
 
-                        // Download media from CDN if present and update the queue entry
-                        if let Some(ref agent) = active_agent {
-                            if let Some(ref item_list) = msg.item_list {
-                                let mut downloaded_media: Vec<MediaItem> = Vec::new();
-                                for item in item_list {
-                                    match try_download_media(item, &msg_id).await {
-                                        Some((local_path, media_type, original_name)) => {
-                                            downloaded_media.push(MediaItem {
-                                                media_type,
-                                                local_path,
-                                                original_name,
-                                            });
+                        let (reply_text, active_agent) = {
+                            let mut router_guard = router_arc.lock().unwrap();
+                            let active = router_guard.active_agent().map(|s| s.to_string());
+                            let reply = router_guard.handle_incoming(&msg).unwrap_or_else(|e| {
+                                Some(format!("Error processing message: {e}"))
+                            });
+                            (reply, active)
+                        };
+
+                        if let Some(text) = reply_text {
+                            let context_token = msg.context_token.unwrap_or_default();
+                            let to_user = msg.from_user_id.unwrap_or_default();
+
+                            let reply = crate::ilink::types::WeixinMessage::build_text_reply(
+                                context_token,
+                                to_user,
+                                text,
+                            );
+                            let send_req = SendMessageRequest {
+                                msg: reply,
+                                base_info: None,
+                            };
+
+                            if let Err(e) = client.send_message(&current_token, &send_req).await {
+                                tracing::warn!("send_message error: {e}");
+                            }
+                        } else {
+                            // Message was routed to agent queue — record context for reply lookup
+                            if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
+                                if let (Some(ctx), Some(user)) =
+                                    (msg.context_token.clone(), msg.from_user_id.clone())
+                                {
+                                    message_contexts.lock().unwrap().insert(
+                                        msg_id.clone(),
+                                        MessageContextInfo {
+                                            context_token: ctx,
+                                            to_user: user,
+                                        },
+                                    );
+                                }
+
+                                // Download media from CDN if present and update the queue entry
+                                if let Some(ref agent) = active_agent {
+                                    if let Some(ref item_list) = msg.item_list {
+                                        let mut downloaded_media: Vec<MediaItem> = Vec::new();
+                                        for item in item_list {
+                                            match try_download_media(item, &msg_id, &cdn_base).await {
+                                                Some((local_path, media_type, original_name)) => {
+                                                    downloaded_media.push(MediaItem {
+                                                        media_type,
+                                                        local_path,
+                                                        original_name,
+                                                    });
+                                                }
+                                                None => {}
+                                            }
                                         }
-                                        None => {}
+                                        if !downloaded_media.is_empty() {
+                                            router_arc.lock().unwrap().queue()
+                                                .update_last_media(agent, downloaded_media)
+                                                .unwrap_or_else(|e| {
+                                                    tracing::warn!("update_last_media error: {e}");
+                                                });
+                                        }
                                     }
                                 }
-                                if !downloaded_media.is_empty() {
-                                    router_arc.lock().unwrap().queue()
-                                        .update_last_media(agent, downloaded_media)
-                                        .unwrap_or_else(|e| {
-                                            tracing::warn!("update_last_media error: {e}");
-                                        });
-                                }
+                            }
+
+                            // Try WebSocket push for real-time delivery to the active agent
+                            if let Some(ref agent) = active_agent {
+                                let msg_id = msg.message_id.map(|id| id.to_string()).unwrap_or_default();
+                                let ws_json = serde_json::json!({
+                                    "type": "message",
+                                    "id": msg_id,
+                                    "from_user": msg.from_user_id.clone().unwrap_or_default(),
+                                    "text": msg.text().unwrap_or(""),
+                                    "timestamp": msg.create_time_ms.unwrap_or(0),
+                                    "context_token": msg.context_token.clone().unwrap_or_default(),
+                                    "message_type": "text",
+                                })
+                                .to_string();
+                                ws_registry.push(agent, &ws_json);
                             }
                         }
-                    }
-
-                    // Try WebSocket push for real-time delivery to the active agent
-                    if let Some(ref agent) = active_agent {
-                        let msg_id = msg.message_id.map(|id| id.to_string()).unwrap_or_default();
-                        let ws_json = serde_json::json!({
-                            "type": "message",
-                            "id": msg_id,
-                            "from_user": msg.from_user_id.clone().unwrap_or_default(),
-                            "text": msg.text().unwrap_or(""),
-                            "timestamp": msg.create_time_ms.unwrap_or(0),
-                            "context_token": msg.context_token.clone().unwrap_or_default(),
-                            "message_type": "text",
-                        })
-                        .to_string();
-                        ws_registry.push(agent, &ws_json);
                     }
                 }
             }
@@ -547,6 +576,7 @@ use crate::ilink::types::MessageItem;
 async fn try_download_media(
     item: &MessageItem,
     msg_id: &str,
+    cdn_base: &str,
 ) -> Option<(String, String, Option<String>)> {
     let item_type = item.item_type?;
 
@@ -599,7 +629,7 @@ async fn try_download_media(
 
     let local_path = crate::ilink::download::download_media(
         &http_client,
-        "https://novac2c.cdn.weixin.qq.com",
+        cdn_base,
         &encrypt_query_param,
         &aes_key,
         cache_dir,
@@ -623,6 +653,29 @@ mod tests {
     use crate::ilink::types::AgentStatus;
 
     // ─── Config tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cdn_base_url_default_matches_constant() {
+        let cfg = GatewayConfig::default();
+        assert_eq!(
+            cfg.cdn_base_url,
+            crate::ilink::types::ILINK_CDN_BASE_URL
+        );
+    }
+
+    #[test]
+    fn test_cdn_base_url_trimmed_c2c_produces_download_base() {
+        let cfg = GatewayConfig::default();
+        let trimmed = cfg.cdn_base_url.trim_end_matches("/c2c");
+        assert_eq!(trimmed, "https://novac2c.cdn.weixin.qq.com");
+
+        // Verify that build_cdn_download_url works correctly with the trimmed value
+        let url = crate::ilink::media::build_cdn_download_url(trimmed, "encrypted_param");
+        assert_eq!(
+            url,
+            "https://novac2c.cdn.weixin.qq.com/c2c?encrypted_param"
+        );
+    }
 
     #[test]
     fn test_config_from_env_with_defaults() {

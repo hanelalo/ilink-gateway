@@ -5,7 +5,6 @@ pub struct GatewayConfig {
     pub http_addr: String,
     pub http_port: u16,
     pub ilink_base_url: String,
-    #[allow(dead_code)]
     pub cdn_base_url: String,
     pub db_path: String,
     #[allow(dead_code)]
