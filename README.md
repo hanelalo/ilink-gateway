@@ -42,11 +42,14 @@ wechat-gateway/
 │       │   └── download.rs  # CDN media download with SSRF protection
 │       ├── agents/
 │       │   ├── registry.rs  # Agent registry with heartbeat tracking
-│       │   └── queue.rs     # Message queue
+│       │   ├── queue.rs     # Message queue
+│       │   └── ws_registry.rs # WebSocket connection registry
 │       ├── router/
 │       │   ├── router.rs    # Message router (media-aware)
 │       │   └── commands.rs  # Command parser (/use, /list, /status, /cmd)
-│       ├── api/server.rs    # HTTP API (axum) + reply channel
+│       ├── api/
+│       │   ├── server.rs    # HTTP API (axum) + reply channel
+│       │   └── ws.rs        # WebSocket handler (real-time push)
 │       ├── storage/         # SQLite credential persistence
 │       └── config.rs
 │
@@ -66,8 +69,10 @@ WeChat → long-poll getupdates → Router.handle_incoming()
   ├── is command (/use, /list, /status, /cmd)
   │     → handle built-in, reply directly to WeChat
   └── is normal message
+        → if media: download from CDN + AES decrypt + cache
         → record context (for reply routing)
         → enqueue to active agent's message queue
+        → push to agent's WebSocket (if connected)
         → agent pulls via GET /api/agents/{name}/poll
         → agent processes, then POST /api/agents/{name}/reply
         → main.rs reply processor receives via channel
@@ -76,9 +81,10 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 ### Features
 
-- **Agent heartbeat detection** — gateway auto-detects offline agents via poll timestamps (30s check, 60s timeout)
-- **Media message support** — image/voice/video/file types with AES-128-ECB CDN encryption/decryption
-- **Reply channel** — asynchronous reply processing via tokio mpsc channel, separates HTTP API from iLink sending
+- **Heartbeat detection** — gateway auto-detects offline agents via poll timestamps (30s check, 60s timeout)
+- **Media support** — image/voice/video/file, AES-128-ECB CDN encrypt on send, decrypt on receive
+- **Reply channel** — async reply processing via tokio mpsc, separates HTTP API from iLink sending
+- **WebSocket push** — real-time message delivery to connected agents with 30s ping/pong
 
 ### Built-in Commands
 

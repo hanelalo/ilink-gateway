@@ -42,11 +42,14 @@ wechat-gateway/
 │       │   └── download.rs  # CDN 媒体下载 (SSRF 防护)
 │       ├── agents/
 │       │   ├── registry.rs  # Agent 注册表 (含心跳检测)
-│       │   └── queue.rs     # 消息队列
+│       │   ├── queue.rs     # 消息队列
+│       │   └── ws_registry.rs # WebSocket 连接注册表
 │       ├── router/
 │       │   ├── router.rs    # 消息路由 (支持媒体类型)
 │       │   └── commands.rs  # 命令解析 (/use, /list, /status, /cmd)
-│       ├── api/server.rs    # HTTP API (axum) + 回复通道
+│       ├── api/
+│       │   ├── server.rs    # HTTP API (axum) + 回复通道
+│       │   └── ws.rs        # WebSocket 处理器 (实时推送)
 │       ├── storage/         # SQLite 凭证持久化
 │       └── config.rs
 │
@@ -66,8 +69,10 @@ WeChat → long-poll getupdates → Router.handle_incoming()
   ├── 是命令 (/use, /list, /status, /cmd)
   │     → 内置处理，直接发回微信
   └── 是普通消息
+        → 有媒体附件则 CDN 下载 + AES 解密 + 缓存
         → 记录上下文 (用于回复路由)
         → 推入 active_agent 的消息队列
+        → 推送至 agent WebSocket (如已连接)
         → agent 通过 GET /api/agents/{name}/poll 拉取
         → agent 处理完后 POST /api/agents/{name}/reply
         → main.rs 回复处理器通过 channel 接收
@@ -77,8 +82,9 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 ### 功能特性
 
 - **Agent 心跳检测** — 通过 poll 时间戳自动检测离线 agent（30 秒检查, 60 秒超时）
-- **媒体消息支持** — 图片/语音/视频/文件类型，AES-128-ECB CDN 加密解密
+- **媒体消息支持** — 图片/语音/视频/文件类型，AES-128-ECB CDN 加解密
 - **回复通道** — 异步回复处理，通过 tokio mpsc 通道分离 HTTP API 和 iLink 发送
+- **WebSocket 推送** — 实时推送消息到已连接的 agent，30s ping/pong 保活
 
 ### 内置命令
 

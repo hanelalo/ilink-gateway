@@ -20,6 +20,7 @@ pub enum GatewayError {
     AgentNotFound(String),
 
     #[error("Agent offline: {0}")]
+    #[allow(dead_code)]
     AgentOffline(String),
 
     #[error("Command execution error: {0}")]
@@ -32,6 +33,7 @@ pub enum GatewayError {
     Io(#[from] std::io::Error),
 
     #[error("Not connected to WeChat")]
+    #[allow(dead_code)]
     NotConnected,
 }
 

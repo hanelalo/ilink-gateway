@@ -20,6 +20,7 @@ use crate::ilink::media::{aes128_ecb_decrypt, build_cdn_download_url, is_valid_c
 /// * `file_name` - Name for the cached file (e.g. based on MD5).
 ///
 /// Returns the local file path of the decrypted media.
+#[allow(dead_code)]
 pub async fn download_media(
     client: &reqwest::Client,
     cdn_base_url: &str,
@@ -63,6 +64,7 @@ pub async fn download_media(
 }
 
 /// Current timestamp in milliseconds since UNIX epoch.
+#[allow(dead_code)]
 pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

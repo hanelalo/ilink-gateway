@@ -34,20 +34,26 @@ Core gateway that maintains the single iLink long-poll connection to WeChat and 
 
 ```
 gateway/src/
-├── main.rs            # Binary entry: config → QR login → long-poll loop → HTTP API
-│                      #   + reply processor (channel-based) + heartbeat checker
+├── main.rs            # Binary entry: config → QR login → long-poll loop
+│                      #   + reply processor (channel-based text + media upload)
+│                      #   + heartbeat checker (30s/60s)
+│                      #   + media download from CDN (AES decrypt + cache)
+│                      #   + WebSocket push to connected agents
 ├── ilink/             # WeChat iLink protocol implementation
-│   ├── types.rs       # All iLink wire types (WeixinMessage, GetUpdates, SendMessage, media types, etc.)
-│   ├── client.rs      # HTTP client: QR login, long-poll getupdates, sendmessage, sendtyping, getconfig, notifystart, getuploadurl
-│   ├── media.rs       # AES-128-ECB encrypt/decrypt, CDN URL validation
+│   ├── types.rs       # All iLink wire types, media types, AgentMessage/Reply
+│   ├── client.rs      # HTTP client: QR login, getupdates, sendmessage, getuploadurl, etc.
+│   ├── media.rs       # AES-128-ECB encrypt/decrypt, CDN URL validation, media upload
 │   └── download.rs    # CDN media download with SSRF protection
 ├── agents/            # Agent lifecycle management
-│   ├── registry.rs    # AgentRegistry: name→AgentInfo mapping, online/offline tracking, heartbeat check
-│   └── queue.rs       # MessageQueue: per-agent FIFO queues (Arc<Mutex<...>>)
+│   ├── registry.rs    # AgentRegistry: name→AgentInfo, online/offline, heartbeat check
+│   ├── queue.rs       # MessageQueue: per-agent FIFO (Arc<Mutex<...>>)
+│   └── ws_registry.rs # WsRegistry: active WebSocket connections per agent
 ├── router/            # Message routing and commands
-│   ├── router.rs      # Router: wires registry + queue + commands, media-aware message extraction
-│   └── commands.rs    # Command parser: /use, /list, /status, /cmd + executor + dangerous command filter
-├── api/server.rs      # Axum HTTP API: POST register, GET poll, POST reply (via channel), GET status
+│   ├── router.rs      # Router: registry + queue + commands, media extraction
+│   └── commands.rs    # /use, /list, /status, /cmd + executor + dangerous filter
+├── api/               # HTTP + WebSocket API
+│   ├── server.rs      # Axum HTTP: register, poll, reply (via channel), status
+│   └── ws.rs          # WebSocket handler: real-time push, agent reply parsing
 ├── storage/           # SQLite credential persistence
 │   └── sqlite_store.rs
 ├── config.rs          # Env-based configuration
@@ -64,8 +70,8 @@ Agent-side client that connects to the gateway and forwards messages to Hermes v
 
 ```
 client/hermes/src/
-├── main.rs           # Binary entry: register → spawn ACP → poll loop
-├── gateway/api.rs    # HTTP client for gateway REST API (register, poll, reply)
+├── main.rs           # Binary entry: register → spawn ACP → poll loop (with media logging)
+├── gateway/api.rs    # HTTP client for gateway REST API (register, poll, reply, media-enabled)
 ├── acp/client.rs     # JSON-RPC 2.0 client over stdio for Hermes ACP subprocess
 ├── client.rs         # HermesClient orchestrator: register → poll loop → ACP session → reply
 ├── config.rs         # Env-based client configuration

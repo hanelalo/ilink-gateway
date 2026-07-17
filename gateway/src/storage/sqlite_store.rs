@@ -12,7 +12,9 @@ pub struct StoredCredentials {
     pub account_id: String,
     pub token: String,
     pub base_url: String,
+    #[allow(dead_code)]
     pub user_id: String,
+    #[allow(dead_code)]
     pub saved_at: String,
 }
 
@@ -92,6 +94,7 @@ impl SqliteStore {
     }
 
     /// Delete all stored credentials.
+    #[allow(dead_code)]
     pub fn delete_credentials(&self) -> Result<()> {
         self.conn
             .execute("DELETE FROM credentials", [])

@@ -38,6 +38,7 @@ impl Router {
     }
 
     /// Set the active agent. Returns error if agent not registered.
+    #[allow(dead_code)]
     pub fn set_active_agent(&mut self, name: &str) -> Result<()> {
         if !self.registry.contains(name) {
             return Err(GatewayError::AgentNotFound(name.to_string()));

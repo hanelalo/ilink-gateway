@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::error::Result;
-use crate::ilink::types::QueuedMessage;
+use crate::ilink::types::{MediaItem, QueuedMessage};
 
 /// A per-agent FIFO message queue, shareable via Clone (Arc<Mutex<...>>).
 #[derive(Clone)]
@@ -48,32 +48,50 @@ impl MessageQueue {
     }
 
     /// Peek at queue length for an agent.
+    #[allow(dead_code)]
     pub fn len(&self, agent: &str) -> usize {
         let inner = self.inner.lock().unwrap();
         inner.queues.get(agent).map_or(0, |q| q.len())
     }
 
     /// Check if the queue for a specific agent is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self, agent: &str) -> bool {
         self.len(agent) == 0
     }
 
     /// Check if an agent has any pending messages.
+    #[allow(dead_code)]
     pub fn has_pending(&self, agent: &str) -> bool {
         self.len(agent) > 0
     }
 
     /// Get total pending messages across all agents.
+    #[allow(dead_code)]
     pub fn total_pending(&self) -> usize {
         let inner = self.inner.lock().unwrap();
         inner.queues.values().map(|q| q.len()).sum()
     }
 
     /// Remove all messages for an agent.
+    #[allow(dead_code)]
     pub fn clear(&self, agent: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(queue) = inner.queues.get_mut(agent) {
             queue.clear();
+        }
+        Ok(())
+    }
+
+    /// Update the media field of the last enqueued message for an agent (in-place).
+    ///
+    /// If the agent has no queue or the queue is empty, this is a no-op.
+    pub fn update_last_media(&self, agent: &str, media: Vec<MediaItem>) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(queue) = inner.queues.get_mut(agent) {
+            if let Some(last) = queue.last_mut() {
+                last.media = media;
+            }
         }
         Ok(())
     }
@@ -236,5 +254,65 @@ mod tests {
         let queue = MessageQueue::new();
         // Should not panic or error
         queue.clear("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn test_update_last_media_updates_in_place() {
+        let queue = MessageQueue::new();
+        queue.enqueue("hermes", make_msg("msg-1", "hello")).unwrap();
+        assert!(queue.has_pending("hermes"));
+
+        let media = vec![MediaItem {
+            media_type: "image".to_string(),
+            local_path: "/tmp/cached/image.jpg".to_string(),
+            original_name: Some("img.jpg".to_string()),
+        }];
+        queue.update_last_media("hermes", media.clone()).unwrap();
+
+        // Peek by dequeueing
+        let msgs = queue.dequeue_all("hermes").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].media.len(), 1);
+        assert_eq!(msgs[0].media[0].media_type, "image");
+        assert_eq!(msgs[0].media[0].local_path, "/tmp/cached/image.jpg");
+        assert_eq!(msgs[0].media[0].original_name.as_deref(), Some("img.jpg"));
+    }
+
+    #[test]
+    fn test_update_last_media_empty_queue_is_noop() {
+        let queue = MessageQueue::new();
+        let media = vec![MediaItem {
+            media_type: "image".to_string(),
+            local_path: "/tmp/img.jpg".to_string(),
+            original_name: None,
+        }];
+        // Should not panic
+        queue.update_last_media("hermes", media).unwrap();
+        assert!(!queue.has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_update_last_media_updates_only_last_message() {
+        let queue = MessageQueue::new();
+        queue.enqueue("hermes", make_msg("msg-1", "first")).unwrap();
+        queue.enqueue("hermes", make_msg("msg-2", "second")).unwrap();
+        queue.enqueue("hermes", make_msg("msg-3", "third")).unwrap();
+
+        let media = vec![MediaItem {
+            media_type: "video".to_string(),
+            local_path: "/tmp/video.mp4".to_string(),
+            original_name: None,
+        }];
+        queue.update_last_media("hermes", media).unwrap();
+
+        let msgs = queue.dequeue_all("hermes").unwrap();
+        assert_eq!(msgs.len(), 3);
+        // First two messages unchanged
+        assert!(msgs[0].media.is_empty());
+        assert!(msgs[1].media.is_empty());
+        // Last message updated
+        assert_eq!(msgs[2].media.len(), 1);
+        assert_eq!(msgs[2].media[0].media_type, "video");
+        assert_eq!(msgs[2].media[0].local_path, "/tmp/video.mp4");
     }
 }

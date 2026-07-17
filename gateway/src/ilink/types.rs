@@ -26,20 +26,24 @@ pub struct BaseInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct GetQrcodeResponse {
+    #[allow(dead_code)]
     pub ret: i32,
     pub qrcode: Option<String>,
     pub qrcode_img_content: Option<String>,
+    #[allow(dead_code)]
     pub errmsg: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct QrcodeStatusResponse {
+    #[allow(dead_code)]
     pub ret: i32,
     pub status: Option<String>,
     pub bot_token: Option<String>,
     pub baseurl: Option<String>,
     pub ilink_bot_id: Option<String>,
     pub ilink_user_id: Option<String>,
+    #[allow(dead_code)]
     pub errmsg: Option<String>,
 }
 
@@ -48,9 +52,11 @@ pub struct QrcodeStatusResponse {
 /// CDN upload response (POST /ilink/bot/getuploadurl)
 #[derive(Debug, Deserialize)]
 pub struct GetUploadUrlResponse {
+    #[allow(dead_code)]
     pub ret: i32,
     pub cdnurl: Option<String>,
     pub aes_key: Option<String>,
+    #[allow(dead_code)]
     pub errmsg: Option<String>,
 }
 
@@ -305,10 +311,12 @@ pub struct GetUpdatesRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct GetUpdatesResponse {
+    #[allow(dead_code)]
     #[serde(default)]
     pub ret: Option<i32>,
     #[serde(default)]
     pub errcode: Option<i32>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub errmsg: Option<String>,
     #[serde(default)]
@@ -328,14 +336,17 @@ pub struct SendMessageRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendMessageResponse {
+    #[allow(dead_code)]
     #[serde(default)]
     pub ret: Option<i32>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub errmsg: Option<String>,
 }
 
 // ── SendTyping ───────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct SendTypingRequest {
     pub ilink_user_id: String,
@@ -347,6 +358,7 @@ pub struct SendTypingRequest {
 
 // ── GetConfig ────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct GetConfigRequest {
     pub ilink_user_id: String,
@@ -357,11 +369,14 @@ pub struct GetConfigRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct GetConfigResponse {
+    #[allow(dead_code)]
     #[serde(default)]
     pub ret: Option<i32>,
     #[serde(default)]
     pub typing_ticket: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     pub errmsg: Option<String>,
 }
@@ -410,10 +425,12 @@ pub enum AgentStatus {
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
     pub name: String,
+    #[allow(dead_code)]
     pub endpoint: Option<String>,
     pub capabilities: Vec<String>,
     pub status: AgentStatus,
     pub last_seen: i64,
+    #[allow(dead_code)]
     pub registered_at: i64,
 }
 
@@ -426,6 +443,7 @@ pub struct QueuedMessage {
     pub timestamp: i64,
     pub context_token: String,
     pub message_type: String,
+    #[allow(dead_code)]
     pub delivered: bool,
     pub media: Vec<MediaItem>,
 }

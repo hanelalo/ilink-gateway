@@ -8,9 +8,14 @@
 //! 5. Build `AppState` for the HTTP API (axum)
 //! 6. Load saved iLink credentials or run QR-code login
 //! 7. `notify_start` to enable outbound messaging
-//! 8. Spawn the HTTP API server in a background task
+//! 8b. Spawn reply processor (channel-based, handles text + media upload)
+//! 8c. Spawn heartbeat checker (30s interval, 60s timeout)
+//! 8d. Spawn HTTP API server (axum)
 //! 9. Enter the long-poll getupdates loop
-//! 10. Handle errcode -14 (session expired) by re-running QR login
+//! 10. Handle errcode -14 (session timeout — sleep 600s, no re-login)
+//!     In the loop: route text commands, enqueue agent messages,
+//!     download CDN media for media messages, record reply context,
+//!     push to WebSocket for real-time delivery
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,7 +29,7 @@ use crate::api::server::{start_server, AppState};
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
 use crate::ilink::client::Client as IlinkClient;
-use crate::ilink::types::{AgentReply, SendMessageRequest, WeixinMessage};
+use crate::ilink::types::{AgentReply, MediaItem, SendMessageRequest, WeixinMessage, msg_type};
 use crate::router::router::Router;
 use crate::storage::sqlite_store::SqliteStore;
 
@@ -148,8 +153,8 @@ async fn main() -> Result<()> {
 
     // 9. Main long-poll loop
     let mut sync_buf = String::new();
-    let mut current_token = token;
-    let mut current_base_url = base_url;
+    let current_token = token;
+    let _current_base_url = base_url;
 
     loop {
         let resp = match client.get_updates(&sync_buf, Some(35)).await {
@@ -212,12 +217,38 @@ async fn main() -> Result<()> {
                             (msg.context_token.clone(), msg.from_user_id.clone())
                         {
                             message_contexts.lock().unwrap().insert(
-                                msg_id,
+                                msg_id.clone(),
                                 MessageContextInfo {
                                     context_token: ctx,
                                     to_user: user,
                                 },
                             );
+                        }
+
+                        // Download media from CDN if present and update the queue entry
+                        if let Some(ref agent) = active_agent {
+                            if let Some(ref item_list) = msg.item_list {
+                                let mut downloaded_media: Vec<MediaItem> = Vec::new();
+                                for item in item_list {
+                                    match try_download_media(item, &msg_id).await {
+                                        Some((local_path, media_type, original_name)) => {
+                                            downloaded_media.push(MediaItem {
+                                                media_type,
+                                                local_path,
+                                                original_name,
+                                            });
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                if !downloaded_media.is_empty() {
+                                    router_arc.lock().unwrap().queue()
+                                        .update_last_media(agent, downloaded_media)
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!("update_last_media error: {e}");
+                                        });
+                                }
+                            }
                         }
                     }
 
@@ -502,6 +533,86 @@ fn expand_tilde(path: &str) -> String {
     } else {
         format!("{}{}", home, &path[1..])
     }
+}
+
+// ─── Media download helper ────────────────────────────────────────────────
+
+use crate::ilink::types::MessageItem;
+
+/// Attempt to download a media item from WeChat CDN.
+///
+/// Returns `(local_path, media_type_string, original_name)` on success, or
+/// `None` if the item is not a downloadable media type or required fields
+/// are missing.
+async fn try_download_media(
+    item: &MessageItem,
+    msg_id: &str,
+) -> Option<(String, String, Option<String>)> {
+    let item_type = item.item_type?;
+
+    let (encrypt_query_param, aes_key_hex, media_type_name, original_name) = match item_type {
+        msg_type::IMAGE => {
+            let img = item.image_item.as_ref()?;
+            (
+                img.encrypt_query_param.clone()?,
+                img.aes_key.clone()?,
+                "image".to_string(),
+                img.md5.clone(),
+            )
+        }
+        msg_type::VOICE => {
+            let voice = item.voice_item.as_ref()?;
+            (
+                voice.encrypt_query_param.clone()?,
+                voice.aes_key.clone()?,
+                "voice".to_string(),
+                None,
+            )
+        }
+        msg_type::VIDEO => {
+            let video = item.video_item.as_ref()?;
+            (
+                video.encrypt_query_param.clone()?,
+                video.aes_key.clone()?,
+                "video".to_string(),
+                video.md5.clone(),
+            )
+        }
+        _ => return None,
+    };
+
+    if encrypt_query_param.is_empty() || aes_key_hex.is_empty() {
+        return None;
+    }
+
+    // Decode 32-char hex AES key to 16 bytes
+    let aes_bytes = hex::decode(&aes_key_hex).ok()?;
+    if aes_bytes.len() != 16 {
+        return None;
+    }
+    let mut aes_key = [0u8; 16];
+    aes_key.copy_from_slice(&aes_bytes);
+
+    let http_client = reqwest::Client::new();
+    let cache_dir = "/tmp/wechat-gateway-media";
+    let file_name = format!("{msg_id}-{media_type_name}");
+
+    let local_path = crate::ilink::download::download_media(
+        &http_client,
+        "https://novac2c.cdn.weixin.qq.com",
+        &encrypt_query_param,
+        &aes_key,
+        cache_dir,
+        &file_name,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("failed to download media for msg {msg_id}: {e}");
+        e
+    })
+    .ok()?;
+
+    Some((local_path, media_type_name, original_name))
 }
 
 // ─── Integration tests ──────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use wechat_gateway_client_hermes::acp::client::AcpClient;
 use wechat_gateway_client_hermes::config::Config;
-use wechat_gateway_client_hermes::error::{ClientError, Result};
+use wechat_gateway_client_hermes::error::Result;
 use wechat_gateway_client_hermes::gateway::api::GatewayClient;
 
 #[tokio::main]
@@ -89,12 +89,42 @@ async fn poll_loop(
                 "Processing message"
             );
 
+            // Log media attachments
+            if !msg.media.is_empty() {
+                tracing::info!(
+                    msg_id = %msg.id,
+                    media_count = msg.media.len(),
+                    "Message has media attachments"
+                );
+                for (i, m) in msg.media.iter().enumerate() {
+                    tracing::debug!(
+                        msg_id = %msg.id,
+                        media_index = i,
+                        media_type = %m.media_type,
+                        local_path = %m.local_path,
+                        "Media attachment"
+                    );
+                }
+            }
+
+            // Build ACP message text, appending media info if present
+            let mut acp_text = msg.text.clone();
+            if !msg.media.is_empty() {
+                let media_desc: Vec<String> = msg.media.iter().map(|m| {
+                    format!("[{}: {}]", m.media_type, m.local_path)
+                }).collect();
+                if !acp_text.is_empty() {
+                    acp_text.push('\n');
+                }
+                acp_text.push_str(&format!("[Media: {}]", media_desc.join(", ")));
+            }
+
             // Create a new ACP session for this message
             let session_id = acp.new_session(&config.hermes_cwd).await?;
             tracing::debug!(session_id = %session_id, "Created ACP session");
 
             // Forward the message text to Hermes and collect the reply
-            let reply = acp.send_message(&session_id, &msg.text).await?;
+            let reply = acp.send_message(&session_id, &acp_text).await?;
             tracing::debug!(session_id = %session_id, "Got reply from ACP");
 
             // Send the reply back through the gateway (if non-empty)
@@ -116,6 +146,7 @@ async fn poll_loop(
 mod tests {
     use super::*;
     use std::env;
+    use wechat_gateway_client_hermes::error::ClientError;
 
     // ---------------------------------------------------------------
     // Config integration tests

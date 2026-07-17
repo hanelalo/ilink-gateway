@@ -44,16 +44,19 @@ impl WsRegistry {
     }
 
     /// Check if an agent has an active WebSocket connection.
+    #[allow(dead_code)]
     pub fn is_connected(&self, name: &str) -> bool {
         self.inner.lock().unwrap().contains_key(name)
     }
 
     /// Number of active WebSocket connections.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }
 
     /// Check whether the registry is empty (no active connections).
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.lock().unwrap().is_empty()
     }

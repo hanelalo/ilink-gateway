@@ -88,9 +88,39 @@ impl HermesClient {
                 // Create a new session for each message
                 match acp.new_session(&self.config.hermes_cwd).await {
                     Ok(session_id) => {
-                        // Forward the message to Hermes
+                        // Log media attachments
+                        if !msg.media.is_empty() {
+                            tracing::info!(
+                                msg_id = %msg.id,
+                                media_count = msg.media.len(),
+                                "Message has media attachments"
+                            );
+                            for (i, m) in msg.media.iter().enumerate() {
+                                tracing::debug!(
+                                    msg_id = %msg.id,
+                                    media_index = i,
+                                    media_type = %m.media_type,
+                                    local_path = %m.local_path,
+                                    "Media attachment"
+                                );
+                            }
+                        }
+
+                        // Build ACP message text, appending media info if present
+                        let mut acp_text = msg.text.clone();
+                        if !msg.media.is_empty() {
+                            let media_desc: Vec<String> = msg.media.iter().map(|m| {
+                                format!("[{}: {}]", m.media_type, m.local_path)
+                            }).collect();
+                            if !acp_text.is_empty() {
+                                acp_text.push('\n');
+                            }
+                            acp_text.push_str(&format!("[Media: {}]", media_desc.join(", ")));
+                        }
+
+                        // Forward the message to Hermes with media info appended
                         match acp
-                            .send_message(&session_id, &msg.text)
+                            .send_message(&session_id, &acp_text)
                             .await
                         {
                             Ok(reply) => {
@@ -303,5 +333,66 @@ mod tests {
         assert_eq!(deserialized.timestamp, 1700000000);
         assert_eq!(deserialized.context_token, "ctx-abc");
         assert_eq!(deserialized.message_type, "text");
+        assert!(deserialized.media.is_empty());
+    }
+
+    #[test]
+    fn test_message_serde_roundtrip_with_media() {
+        let msg = crate::gateway::api::GatewayMessage {
+            id: "msg-2".to_string(),
+            from_user: "user456".to_string(),
+            text: "Check out this file".to_string(),
+            timestamp: 1700000001,
+            context_token: "ctx-def".to_string(),
+            message_type: "text".to_string(),
+            media: vec![
+                crate::gateway::api::GatewayMediaItem {
+                    media_type: "image".to_string(),
+                    local_path: "/tmp/abc.jpg".to_string(),
+                    original_name: Some("photo.jpg".to_string()),
+                },
+                crate::gateway::api::GatewayMediaItem {
+                    media_type: "file".to_string(),
+                    local_path: "/tmp/xyz.pdf".to_string(),
+                    original_name: Some("doc.pdf".to_string()),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: crate::gateway::api::GatewayMessage =
+            serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.id, "msg-2");
+        assert_eq!(deserialized.media.len(), 2);
+        assert_eq!(deserialized.media[0].media_type, "image");
+        assert_eq!(deserialized.media[0].local_path, "/tmp/abc.jpg");
+        assert_eq!(
+            deserialized.media[0].original_name,
+            Some("photo.jpg".to_string())
+        );
+        assert_eq!(deserialized.media[1].media_type, "file");
+        assert_eq!(deserialized.media[1].local_path, "/tmp/xyz.pdf");
+        assert_eq!(
+            deserialized.media[1].original_name,
+            Some("doc.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn test_message_serde_roundtrip_media_defaults_to_empty() {
+        let json = r#"{
+            "id": "msg-3",
+            "from_user": "user789",
+            "text": "no media",
+            "timestamp": 1700000002,
+            "context_token": "ctx-ghi",
+            "message_type": "text"
+        }"#;
+        let deserialized: crate::gateway::api::GatewayMessage =
+            serde_json::from_str(json).unwrap();
+
+        assert_eq!(deserialized.id, "msg-3");
+        assert!(deserialized.media.is_empty());
     }
 }

@@ -52,6 +52,7 @@ impl AgentRegistry {
     }
 
     /// Unregister an agent, removing it from the registry.
+    #[allow(dead_code)]
     pub fn unregister(&mut self, name: &str) -> Result<()> {
         if self.agents.remove(name).is_none() {
             return Err(GatewayError::AgentNotFound(name.to_string()));
@@ -60,6 +61,7 @@ impl AgentRegistry {
     }
 
     /// Get agent info by name.
+    #[allow(dead_code)]
     pub fn get(&self, name: &str) -> Option<&AgentInfo> {
         self.agents.get(name)
     }
@@ -75,6 +77,7 @@ impl AgentRegistry {
     }
 
     /// Check if the registry is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
     }
@@ -96,6 +99,7 @@ impl AgentRegistry {
     }
 
     /// Mark an agent as offline (timeout / disconnect).
+    #[allow(dead_code)]
     pub fn mark_offline(&mut self, name: &str) -> Result<()> {
         let agent = self
             .agents
@@ -124,6 +128,7 @@ impl AgentRegistry {
     }
 
     /// Count online agents.
+    #[allow(dead_code)]
     pub fn online_count(&self) -> usize {
         self.agents
             .values()

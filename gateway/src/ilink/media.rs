@@ -6,6 +6,7 @@ use crate::ilink::client::Client;
 use crate::ilink::types::{msg_type, GetUploadUrlRequest};
 
 /// Validates that a CDN URL belongs to an allowed WeChat CDN domain.
+#[allow(dead_code)]
 pub fn is_valid_cdn_url(url: &str) -> bool {
     // Only allow *.cdn.weixin.qq.com
     url.starts_with("https://novac2c.cdn.weixin.qq.com/")
@@ -13,6 +14,7 @@ pub fn is_valid_cdn_url(url: &str) -> bool {
 }
 
 /// Decrypt AES-128-ECB encrypted data with PKCS7 padding removal.
+#[allow(dead_code)]
 pub fn aes128_ecb_decrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     use aes::cipher::{BlockDecrypt, KeyInit};
 
@@ -82,6 +84,7 @@ pub fn aes128_ecb_encrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Build a CDN download URL from CDN base and encrypt_query_param.
+#[allow(dead_code)]
 pub fn build_cdn_download_url(cdn_base: &str, encrypt_query_param: &str) -> String {
     format!(
         "{}/c2c?{}",
