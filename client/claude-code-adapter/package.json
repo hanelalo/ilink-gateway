@@ -1,0 +1,23 @@
+{
+  "name": "claude-code-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code adapter for wechat-gateway",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.214"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
