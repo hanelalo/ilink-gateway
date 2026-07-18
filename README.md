@@ -102,8 +102,10 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - A WeChat account (for QR code login)
+- [Hermes Agent](https://hermes-agent.nousresearch.com/) installed (for the plugin path)
+- Python 3.10+ with `aiohttp`
 
-### Build
+### 1. Build and Run the Gateway
 
 ```bash
 cd wechat-gateway
@@ -114,7 +116,66 @@ export HTTPS_PROXY=http://127.0.0.1:7897
 
 # Build
 cargo build --release
+
+# Run — scan the QR code in terminal to log in
+./target/release/wechat-gateway
 ```
+
+On first run, the gateway prints a QR code in the terminal. Scan it with WeChat and tap **Confirm** on your phone. Credentials are saved to `~/.wechat-gateway/data.db` and reused automatically on restart.
+
+### 2. Install the Hermes Plugin
+
+Symlink the plugin into Hermes' plugin directory:
+
+```bash
+ln -s ~/develop/wechat-gateway/client/hermes-wechat-plugin ~/.hermes/plugins/wechat-gateway
+```
+
+Add environment variables to `~/.hermes/.env`:
+
+```bash
+WECHAT_GATEWAY_URL=http://127.0.0.1:8765
+WECHAT_GATEWAY_AGENT_NAME=hermes
+```
+
+Enable the plugin in `~/.hermes/config.yaml`:
+
+```yaml
+plugins:
+  enabled:
+    - wechat-gateway
+
+gateway:
+  platforms:
+    wechat_gateway:
+      enabled: true
+      extra:
+        dm_policy: pairing  # requires approval before first use
+```
+
+### 3. Start Hermes
+
+```bash
+hermes gateway restart
+```
+
+Hermes loads the plugin, which registers itself (`hermes`) with the gateway and starts polling for messages.
+
+### 4. Pair and Chat
+
+Send a message from WeChat to the bot account. Since `dm_policy` is `pairing`, Hermes will prompt you to authorize:
+
+```
+Unauthorized user <wxid> on wechat_gateway
+```
+
+On the Hermes CLI, approve the user:
+
+```bash
+hermes pairing approve <wxid> wechat_gateway
+```
+
+Hermes sends the pairing code back through the gateway to you on WeChat. After pairing, messages are handled normally — including all slash commands like `/new`.
 
 ### Run Tests
 
@@ -128,30 +189,44 @@ cargo test -p wechat-gateway
 
 > **Note**: All gateway modules have complete unit test coverage (~440 tests).
 
-### Registering an Agent
+### API Reference (for custom agents)
+
+Any HTTP client can act as an agent by registering directly:
 
 ```bash
+# Register
 curl -X POST http://127.0.0.1:8765/api/agents/register \
   -H 'Content-Type: application/json' \
   -d '{"name": "my-agent", "capabilities": ["text"]}'
-```
 
-### Polling & Replying
-
-```bash
 # Poll for pending messages
 curl http://127.0.0.1:8765/api/agents/my-agent/poll
 
-# Send a reply
+# Reply
 curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
   -H 'Content-Type: application/json' \
   -d '{"reply_to_id": "msg_id", "text": "Hello from my agent!"}'
+
+# Proactive send (pairing codes, notifications)
+curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
+  -H 'Content-Type: application/json' \
+  -d '{"reply_to_id": "", "text": "Your code is 12345678", "to_user": "wxid_xxx"}'
+
+# Check status
+curl http://127.0.0.1:8765/api/status
 ```
 
-### Gateway Status
+### WebSocket (real-time push)
 
 ```bash
-curl http://127.0.0.1:8765/api/status
+# Connect via websocat or similar
+websocat ws://127.0.0.1:8765/ws/agents/my-agent
+
+# Receive pushed messages as JSON
+{"type":"message","id":"...","from_user":"wxid_xxx","text":"hello","context_token":"..."}
+
+# Send a reply via WebSocket
+{"type":"reply","reply_to_id":"msg_id","text":"Hello back"}
 ```
 
 ## Configuration

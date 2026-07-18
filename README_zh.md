@@ -102,8 +102,10 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - 一个微信账号（用于扫码登录）
+- 已安装 [Hermes Agent](https://hermes-agent.nousresearch.com/)
+- Python 3.10+ 并安装 `aiohttp`
 
-### 构建
+### 1. 构建并启动网关
 
 ```bash
 cd wechat-gateway
@@ -114,7 +116,66 @@ export HTTPS_PROXY=http://127.0.0.1:7897
 
 # 构建
 cargo build --release
+
+# 运行 — 终端输出二维码，用微信扫码并确认
+./target/release/wechat-gateway
 ```
+
+首次运行会在终端打印二维码，用微信扫码并在手机上点**确认登录**。凭证保存到 `~/.wechat-gateway/data.db`，后续启动自动复用。
+
+### 2. 安装 Hermes 插件
+
+将插件软链接到 Hermes 插件目录：
+
+```bash
+ln -s ~/develop/wechat-gateway/client/hermes-wechat-plugin ~/.hermes/plugins/wechat-gateway
+```
+
+在 `~/.hermes/.env` 中添加环境变量：
+
+```bash
+WECHAT_GATEWAY_URL=http://127.0.0.1:8765
+WECHAT_GATEWAY_AGENT_NAME=hermes
+```
+
+在 `~/.hermes/config.yaml` 中启用插件：
+
+```yaml
+plugins:
+  enabled:
+    - wechat-gateway
+
+gateway:
+  platforms:
+    wechat_gateway:
+      enabled: true
+      extra:
+        dm_policy: pairing  # 首次使用需审批
+```
+
+### 3. 启动 Hermes
+
+```bash
+hermes gateway restart
+```
+
+Hermes 加载插件后会自动向 gateway 注册（名称 `hermes`）并开始轮询消息。
+
+### 4. 配对并聊天
+
+向机器人账号发一条微信消息。由于 `dm_policy` 设为 `pairing`，Hermes 会提示未授权：
+
+```
+Unauthorized user <wxid> on wechat_gateway
+```
+
+在 Hermes CLI 中审批该用户：
+
+```bash
+hermes pairing approve <wxid> wechat_gateway
+```
+
+Hermes 会通过 gateway 将配对码发回你的微信。配对完成后，消息正常处理，所有斜杠命令（如 `/new`）均可用。
 
 ### 运行测试
 
@@ -128,20 +189,17 @@ cargo test -p wechat-gateway
 
 > **注意**: 所有模块都有完整的单元测试覆盖（约 440 个 gateway 测试）。
 
-### 注册 Agent
+### API 参考（自定义 Agent）
 
-Agent 启动后通过 HTTP 注册到网关：
+任何 HTTP 客户端都可以直接注册为 agent：
 
 ```bash
+# 注册
 curl -X POST http://127.0.0.1:8765/api/agents/register \
   -H 'Content-Type: application/json' \
   -d '{"name": "my-agent", "capabilities": ["text"]}'
-```
 
-### 轮询和回复
-
-```bash
-# Agent 轮询消息
+# 轮询消息
 curl http://127.0.0.1:8765/api/agents/my-agent/poll
 
 # 回复消息
@@ -149,16 +207,26 @@ curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
   -H 'Content-Type: application/json' \
   -d '{"reply_to_id": "msg_id", "text": "回复内容"}'
 
-# 回复消息（带媒体文件）
+# 主动发送（配对码、通知等）
 curl -X POST http://127.0.0.1:8765/api/agents/my-agent/reply \
   -H 'Content-Type: application/json' \
-  -d '{"reply_to_id": "msg_id", "text": "图片回复", "media_paths": ["/tmp/image.jpg"]}'
+  -d '{"reply_to_id": "", "text": "配对码: 12345678", "to_user": "wxid_xxx"}'
+
+# 查看状态
+curl http://127.0.0.1:8765/api/status
 ```
 
-### 查看状态
+### WebSocket 推送
 
 ```bash
-curl http://127.0.0.1:8765/api/status
+# 连接 WebSocket（需安装 websocat）
+websocat ws://127.0.0.1:8765/ws/agents/my-agent
+
+# 收到推送消息（JSON）
+{"type":"message","id":"...","from_user":"wxid_xxx","text":"你好","context_token":"..."}
+
+# 通过 WebSocket 回复
+{"type":"reply","reply_to_id":"msg_id","text":"回复内容"}
 ```
 
 ## 配置
