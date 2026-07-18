@@ -79,13 +79,13 @@ impl Default for InitializeParams {
     }
 }
 
-/// Parameters for the `sessions/new` method.
+/// Parameters for the `session/new` method.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams {
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_mode: Option<String>,
+    pub mcp_servers: Option<Vec<serde_json::Value>>,
 }
 
 /// Parameters for the `session/prompt` method (PromptRequest).
@@ -164,8 +164,10 @@ impl AcpClient {
 
     /// Send a JSON-RPC request and wait for the response.
     ///
-    /// Writes the request to the process's stdin and reads one
-    /// response line from its stdout.
+    /// Writes the request to the process's stdin and reads lines from
+    /// its stdout until a response matching our request `id` is found.
+    /// This handles streaming ACP methods (like `session/prompt`) that
+    /// emit intermediate notifications before the final response.
     ///
     /// # Errors
     ///
@@ -197,35 +199,51 @@ impl AcpClient {
             })?;
         }
 
+        // ACP methods like session/prompt emit multiple JSON-RPC lines:
+        // intermediate notifications (no `id`) followed by the final
+        // response (with our request `id`).  Keep reading until we find
+        // the matching response.
         let mut response_line = String::new();
-        {
-            let mut stdout = self.stdout.lock().await;
-            stdout.read_line(&mut response_line).map_err(|e| {
-                ClientError::Acp(format!("Failed to read from ACP stdout: {}", e))
-            })?;
+        loop {
+            response_line.clear();
+            {
+                let mut stdout = self.stdout.lock().await;
+                stdout.read_line(&mut response_line).map_err(|e| {
+                    ClientError::Acp(format!("Failed to read from ACP stdout: {}", e))
+                })?;
+            }
+
+            if response_line.is_empty() {
+                return Err(ClientError::AcpProcessExit(
+                    "ACP process closed stdout unexpectedly".to_string(),
+                ));
+            }
+
+            // Try to parse.  If it's a notification (no `id`) or
+            // a response for a different request, skip it.
+            let line = response_line.trim();
+            let v: serde_json::Value =
+                serde_json::from_str(line).map_err(ClientError::Serialize)?;
+            if v.get("id") != Some(&serde_json::json!(id)) {
+                continue;
+            }
+
+            let resp: AcpResponse =
+                serde_json::from_str(line).map_err(ClientError::Serialize)?;
+
+            if let Some(err) = resp.error {
+                return Err(ClientError::Acp(format!(
+                    "ACP error (code {}): {}",
+                    err.code, err.message
+                )));
+            }
+
+            return resp.result.ok_or_else(|| {
+                ClientError::Acp(
+                    "ACP response missing both result and error".to_string(),
+                )
+            });
         }
-
-        if response_line.is_empty() {
-            return Err(ClientError::AcpProcessExit(
-                "ACP process closed stdout unexpectedly".to_string(),
-            ));
-        }
-
-        let resp: AcpResponse =
-            serde_json::from_str(&response_line).map_err(ClientError::Serialize)?;
-
-        if let Some(err) = resp.error {
-            return Err(ClientError::Acp(format!(
-                "ACP error (code {}): {}",
-                err.code, err.message
-            )));
-        }
-
-        resp.result.ok_or_else(|| {
-            ClientError::Acp(
-                "ACP response missing both result and error".to_string(),
-            )
-        })
     }
 
     /// Initialize the ACP connection (handshake).
@@ -252,7 +270,7 @@ impl AcpClient {
     pub async fn new_session(&self, cwd: &str) -> Result<String> {
         let params = NewSessionParams {
             cwd: cwd.to_string(),
-            session_mode: None,
+            mcp_servers: Some(vec![]),
         };
         let params_value = serde_json::to_value(params)?;
         let result = self
@@ -511,25 +529,35 @@ mod tests {
     fn test_new_session_params_serialization() {
         let params = NewSessionParams {
             cwd: "/Users/test".to_string(),
-            session_mode: Some("agent".to_string()),
+            mcp_servers: None,
         };
 
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["cwd"], "/Users/test");
-        assert_eq!(json["sessionMode"], "agent");
+        assert!(json.get("mcpServers").is_none(), "mcpServers should be absent when None");
     }
 
     #[test]
     fn test_new_session_params_without_mode() {
         let params = NewSessionParams {
             cwd: "/Users/test".to_string(),
-            session_mode: None,
+            mcp_servers: None,
         };
 
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["cwd"], "/Users/test");
-        // sessionMode should be absent
-        assert!(json.get("sessionMode").is_none());
+    }
+
+    #[test]
+    fn test_new_session_params_with_mcp_servers() {
+        let params = NewSessionParams {
+            cwd: "/Users/test".to_string(),
+            mcp_servers: Some(vec![]),
+        };
+
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["cwd"], "/Users/test");
+        assert_eq!(json["mcpServers"].as_array().unwrap().len(), 0);
     }
 
     // ------------------------------------------------------------------
