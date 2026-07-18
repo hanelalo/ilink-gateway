@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
     }
 
     // 7b. Spawn reply processor background task
-    let mut reply_handle = {
+    {
         let reply_client = match IlinkClient::new(Some(base_url.clone())) {
             Ok(c) => c,
             Err(e) => {
@@ -183,18 +183,8 @@ async fn main() -> Result<()> {
             biased;
             _ = shutdown_rx.changed() => {
                 tracing::info!("shutdown signal received, exiting long-poll loop");
-                // Drop our reply_tx references so the handler can detect shutdown
-                // (remaining references in server_state are dropped when server task stops)
-                tracing::info!("waiting for reply processor to finish...");
-                tokio::select! {
-                    biased;
-                    _ = &mut reply_handle => {
-                        tracing::info!("reply processor finished");
-                    },
-                    _ = tokio::time::sleep(Duration::from_secs(3)) => {
-                        tracing::warn!("reply processor did not finish within 3s, dropping");
-                    }
-                }
+                // reply_tx clones held by _state and server_state are dropped
+                // when those tasks are killed by the runtime on main() exit
                 break Ok(());
             }
             result = client.get_updates(&sync_buf, Some(35)) => {
