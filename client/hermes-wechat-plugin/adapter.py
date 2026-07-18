@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_GATEWAY_URL = "http://127.0.0.1:8765"
 DEFAULT_AGENT_NAME = "hermes"
 DEFAULT_POLL_INTERVAL = 1.0  # seconds
+
+CONTENT_MAX_LENGTH = 2000
+SEGMENT_DELAY = 1.5  # seconds between segments
+_FENCE_RE = re.compile(r"^```")
 
 
 def _str_env(name: str, default: str = "") -> str:
@@ -89,7 +94,117 @@ def _env_enablement() -> Optional[dict]:
     return seed
 
 
-# ─── Adapter ──────────────────────────────────────────────────────────────────
+# ─── Message splitting helpers ──────────────────────────────────────────────
+
+
+def _split_markdown_blocks(text: str) -> list[str]:
+    """Split text at blank lines and code fence boundaries.
+
+    Code blocks are kept intact as single units.
+    """
+    if not text:
+        return []
+    blocks: list[str] = []
+    lines = text.splitlines()
+    current: list[str] = []
+    in_code_block = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if _FENCE_RE.match(line.strip()):
+            if not in_code_block and current:
+                blocks.append("\n".join(current).strip())
+                current = []
+            current.append(line)
+            in_code_block = not in_code_block
+            if not in_code_block:
+                blocks.append("\n".join(current).strip())
+                current = []
+            continue
+
+        if in_code_block:
+            current.append(line)
+            continue
+
+        if not line.strip():
+            if current:
+                blocks.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+
+    if current:
+        blocks.append("\n".join(current).strip())
+    return [b for b in blocks if b]
+
+
+def _truncate_block(block: str, max_len: int, seg_index: int, seg_total: int) -> list[str]:
+    """Split a single oversized block at character boundary with [N/M] prefix."""
+    prefix = f"[{seg_index}/{seg_total}] "
+    usable = max_len - len(prefix)
+    if usable <= 0:
+        return [block[:max_len]]
+    result: list[str] = []
+    remaining = block
+    while remaining:
+        if len(remaining) <= usable:
+            result.append(f"{prefix}{remaining}")
+            break
+        result.append(f"{prefix}{remaining[:usable]}")
+        remaining = remaining[usable:]
+        seg_total = max(seg_total, len(result))
+        prefix = f"[{len(result)}/{seg_total}] "
+        usable = max_len - len(prefix)
+    return result
+
+
+def _pack_blocks(blocks: list[str], max_len: int) -> list[str]:
+    """Greedily pack blocks into segments under max_len.
+
+    Single blocks exceeding max_len are truncated at character boundary
+    with [N/M] prefix.
+    """
+    if not blocks:
+        return []
+    packed: list[str] = []
+    current = ""
+    oversized: list[str] = []
+
+    for block in blocks:
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= max_len:
+            current = candidate
+            continue
+        if current:
+            packed.append(current)
+            current = ""
+        if len(block) <= max_len:
+            current = block
+            continue
+        oversized.append(block)
+
+    if current:
+        packed.append(current)
+
+    if oversized:
+        seg_total = len(packed) + len(oversized)
+        for block in oversized:
+            packed.extend(_truncate_block(block, max_len, len(packed) + 1, seg_total))
+
+    return packed
+
+
+def _split_content(text: str, max_len: int) -> list[str]:
+    """Split text into segments respecting markdown block boundaries."""
+    if not text:
+        return []
+    if len(text) <= max_len:
+        return [text]
+    blocks = _split_markdown_blocks(text)
+    return _pack_blocks(blocks, max_len)
+
+
+# ─── Adapter ────────────────────────────────────────────────────────────────
 
 
 class WeChatGatewayAdapter(BasePlatformAdapter):
@@ -185,6 +300,12 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "dm"}
 
     # ── Internal: Register ──────────────────────────────────────────────
+
+    def _ensure_header(self, text: str) -> str:
+        """Prepend **<agent_name>** header if not already present."""
+        if text.startswith("**"):
+            return text
+        return f"**{self.agent_name}**\n\n{text}"
 
     async def _register(self) -> bool:
         """POST /api/agents/register with this agent's name."""
@@ -304,6 +425,18 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         logger.debug("Handling message %s from %s", msg_id, from_user)
         await self.handle_message(event)
 
+    # ── Internal: Segment send helper ────────────────────────────────────────
+
+    async def _send_segments(self, segments: list[str], send_fn) -> SendResult:
+        """Send multiple segments sequentially with delay."""
+        for i, segment in enumerate(segments):
+            result = await send_fn(segment)
+            if not result.success and i == 0:
+                return result
+            if i < len(segments) - 1:
+                await asyncio.sleep(SEGMENT_DELAY)
+        return SendResult(success=True, message_id="")
+
     # ── Internal: Proactive send ──────────────────────────────────────────
 
     async def _send_proactive(self, chat_id: str, text: str) -> SendResult:
@@ -312,49 +445,61 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         Used for pairing codes, notifications, etc. where there is no
         pre-existing message context.
         """
-        url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
-        body = {
-            "reply_to_id": "",
-            "text": text,
-            "media_paths": [],
-            "to_user": chat_id,
-            "context_token": "",
-        }
-        try:
-            async with self._session.post(url, json=body) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    logger.error("Proactive send returned %s: %s", resp.status, err_text)
-                    return SendResult(success=False, message_id="")
-                data = await resp.json()
-                success = data.get("ok", False)
-                return SendResult(success=success, message_id="")
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.error("Proactive send HTTP error: %s", e)
-            return SendResult(success=False, message_id="")
+        text = self._ensure_header(text)
+        segments = _split_content(text, CONTENT_MAX_LENGTH)
+
+        async def _send_one(content: str) -> SendResult:
+            url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
+            body = {
+                "reply_to_id": "",
+                "text": content,
+                "media_paths": [],
+                "to_user": chat_id,
+                "context_token": "",
+            }
+            try:
+                async with self._session.post(url, json=body) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        logger.error("Proactive send returned %s: %s", resp.status, err_text)
+                        return SendResult(success=False, message_id="")
+                    data = await resp.json()
+                    success = data.get("ok", False)
+                    return SendResult(success=success, message_id="")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.error("Proactive send HTTP error: %s", e)
+                return SendResult(success=False, message_id="")
+
+        return await self._send_segments(segments, _send_one)
 
     # ── Internal: Send reply ────────────────────────────────────────────
 
     async def _send_reply(self, reply_to_id: str, text: str) -> SendResult:
         """POST /api/agents/{name}/reply with the response."""
-        url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
-        body = {
-            "reply_to_id": reply_to_id,
-            "text": text,
-            "media_paths": [],
-        }
-        try:
-            async with self._session.post(url, json=body) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    logger.error("Reply returned %s: %s", resp.status, err_text)
-                    return SendResult(success=False, message_id="")
-                data = await resp.json()
-                success = data.get("ok", False)
-                return SendResult(success=success, message_id=reply_to_id)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.error("Reply HTTP error: %s", e)
-            return SendResult(success=False, message_id="")
+        text = self._ensure_header(text)
+        segments = _split_content(text, CONTENT_MAX_LENGTH)
+
+        async def _send_one(content: str) -> SendResult:
+            url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
+            body = {
+                "reply_to_id": reply_to_id,
+                "text": content,
+                "media_paths": [],
+            }
+            try:
+                async with self._session.post(url, json=body) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        logger.error("Reply returned %s: %s", resp.status, err_text)
+                        return SendResult(success=False, message_id="")
+                    data = await resp.json()
+                    success = data.get("ok", False)
+                    return SendResult(success=success, message_id=reply_to_id)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.error("Reply HTTP error: %s", e)
+                return SendResult(success=False, message_id="")
+
+        return await self._send_segments(segments, _send_one)
 
 
 # ─── Plugin entry point ───────────────────────────────────────────────────────
