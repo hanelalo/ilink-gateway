@@ -186,6 +186,27 @@ async fn main() -> Result<()> {
         "gateway started — entering long-poll loop (target: {base_url})"
     );
 
+    // Spawn a periodic cleanup task for stale message contexts.
+    // Contexts are kept for multiple replies per message (e.g., streaming batches),
+    // so we periodically purge entries older than 10 minutes.
+    {
+        let ctx_cleanup = message_contexts.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let cutoff = Instant::now() - Duration::from_secs(600);
+                let mut map = ctx_cleanup.lock().unwrap();
+                let before = map.len();
+                map.retain(|_, v| v.received_at > cutoff);
+                let removed = before - map.len();
+                if removed > 0 {
+                    tracing::debug!("cleaned {removed} stale message contexts");
+                }
+            }
+        });
+    }
+
     // 9. Main long-poll loop
     let mut sync_buf = String::new();
     let current_token = token;
@@ -708,14 +729,14 @@ async fn handle_agent_replies(
                 (ctx, to.clone(), None, String::new(), String::new())
             } else {
                 // Look up context by reply_to_id
-                let mut map = contexts.lock().unwrap();
-                match map.remove(&reply.reply_to_id) {
+                let map = contexts.lock().unwrap();
+                match map.get(&reply.reply_to_id) {
                     Some(info) => (
-                        info.context_token,
-                        info.to_user,
+                        info.context_token.clone(),
+                        info.to_user.clone(),
                         Some(info.received_at),
-                        info.message_preview,
-                        info.agent_name,
+                        info.message_preview.clone(),
+                        info.agent_name.clone(),
                     ),
                     None => {
                         tracing::warn!("no context found for reply_to_id={}", reply.reply_to_id,);
