@@ -204,7 +204,11 @@ impl Router {
 
         // Command messages start with "/"
         if text.starts_with('/') {
-            return self.handle_command(text);
+            // Try to handle as a gateway command. If it's not recognized
+            // (Ok(None)), fall through and route to the active agent.
+            if let Some(reply) = self.handle_command(text)? {
+                return Ok(Some(reply));
+            }
         }
 
         // Normal message — route to active agent
@@ -235,6 +239,11 @@ impl Router {
     }
 
     /// Handle a command message (starts with "/").
+    /// Handle a gateway-recognized command message (starts with "/").
+    ///
+    /// Returns `Ok(Some(reply))` for recognized commands, or `Ok(None)` if the
+    /// text is not a recognized gateway command — the caller should then route
+    /// the message to the active agent instead.
     fn handle_command(&mut self, text: &str) -> Result<Option<String>> {
         match parse_command(text) {
             Some(RouterCommand::UseAgent(name)) => {
@@ -268,7 +277,8 @@ impl Router {
                     Err(e) => Ok(Some(format!("Command error: {e}"))),
                 }
             }
-            None => Ok(Some(format!("Unknown command: {text}"))),
+            // Not a recognized gateway command — let the caller route to an agent.
+            None => Ok(None),
         }
     }
 
@@ -677,13 +687,14 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_incoming_unknown_command() {
+    fn test_handle_incoming_unknown_command_routed_to_agent() {
         let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
         let msg = make_text_msg("/foobar");
         let result = router.handle_incoming(&msg).unwrap();
-        assert!(result.is_some());
-        let text = result.unwrap();
-        assert!(text.contains("Unknown"));
+        assert!(result.is_none());
+        assert!(router.queue().has_pending("hermes"));
     }
 
     /// /cmd test.  Needs a multi-thread runtime because handle_command uses
