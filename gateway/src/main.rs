@@ -106,16 +106,18 @@ async fn main() -> Result<()> {
     spawn_heartbeat_checker(router_arc.clone(), 30, 60);
 
     // 6. Load saved iLink credentials or run QR-code login
-    let store_lock = store_arc.lock().unwrap();
-    let (token, base_url) = match store_lock.load_credentials()? {
-        Some(creds) => {
-            tracing::info!("loaded saved iLink credentials for account {}", creds.account_id);
-            (creds.token, creds.base_url)
-        }
-        None => {
-            tracing::info!("no saved credentials found; starting QR code login");
-            let client = IlinkClient::new(Some(config.ilink_base_url.clone()))?;
-            qr_login_and_save(&client, &store_lock).await?
+    let (token, base_url) = {
+        let store_lock = store_arc.lock().unwrap();
+        match store_lock.load_credentials()? {
+            Some(creds) => {
+                tracing::info!("loaded saved iLink credentials for account {}", creds.account_id);
+                (creds.token, creds.base_url)
+            }
+            None => {
+                tracing::info!("no saved credentials found; starting QR code login");
+                let client = IlinkClient::new(Some(config.ilink_base_url.clone()))?;
+                qr_login_and_save(&client, &store_lock).await?
+            }
         }
     };
 
