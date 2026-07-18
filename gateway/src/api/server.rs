@@ -39,6 +39,10 @@ pub struct ReplyRequest {
     pub text: String,
     #[serde(default)]
     pub media_paths: Vec<String>,
+    #[serde(default)]
+    pub acp_session_id: Option<String>,
+    #[serde(default)]
+    pub acp_from_user: Option<String>,
 }
 
 // ─── Application state ──────────────────────────────────────────────────────
@@ -144,6 +148,7 @@ pub async fn handle_poll(
     let agent_msgs: Vec<serde_json::Value> = messages
         .into_iter()
         .map(|m| {
+            let session_id = router.get_session(&name, &m.from_user);
             let media: Vec<serde_json::Value> = m
                 .media
                 .into_iter()
@@ -162,6 +167,7 @@ pub async fn handle_poll(
                 "timestamp": m.timestamp,
                 "context_token": m.context_token,
                 "message_type": m.message_type,
+                "session_id": session_id,
                 "media": media,
             })
         })
@@ -179,9 +185,16 @@ pub async fn handle_poll(
 /// when the iLink client is available.
 pub async fn handle_reply(
     State(state): State<Arc<AppState>>,
-    Path(_name): Path<String>,
+    Path(name): Path<String>,
     Json(body): Json<ReplyRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Store ACP session info if provided
+    if let (Some(session_id), Some(from_user)) = (body.acp_session_id, body.acp_from_user)
+    {
+        let mut router = state.router.lock().unwrap();
+        router.set_session(&name, &from_user, session_id);
+    }
+
     // Send reply through channel
     let reply = AgentReply {
         reply_to_id: body.reply_to_id,

@@ -18,20 +18,20 @@ pub struct HermesClient {
     config: Config,
     gateway: GatewayClient,
     acp: Option<AcpClient>,
+    /// Per-user ACP session IDs, seeded from gateway's session_id.
+    sessions: HashMap<String, String>,
 }
 
 impl HermesClient {
     /// Create a new HermesClient from the given configuration.
     pub fn new(config: Config) -> Self {
-        // Build gateway client from config; if config is valid this should
-        // succeed. We unwrap/expect because Config validation ensures non-empty
-        // values at construction time.
         let gateway = GatewayClient::new(&config.gateway_url, &config.agent_name)
             .expect("valid config should produce a gateway client");
         Self {
             config,
             gateway,
             acp: None,
+            sessions: HashMap::new(),
         }
     }
 
@@ -69,12 +69,9 @@ impl HermesClient {
 
     /// Poll for messages and process them in a loop.
     ///
-    /// This polls the gateway at the configured interval, forwards any
-    /// pending messages to the Hermes ACP, and sends replies back to
-    /// the gateway.
-    ///
-    /// ACP sessions are reused per WeChat user: one session per
-    /// `from_user`, created on first message and closed only on error.
+    /// ACP sessions are reused per WeChat user, seeded from gateway's
+    /// session_id when available.  New sessions are reported back to
+    /// the gateway via the reply API so they persist across restarts.
     ///
     /// # Errors
     ///
@@ -84,9 +81,6 @@ impl HermesClient {
             .acp
             .as_ref()
             .ok_or_else(|| crate::error::ClientError::NotConnected)?;
-
-        // Per-user ACP session cache: from_user → session_id
-        let mut sessions: HashMap<String, String> = HashMap::new();
 
         loop {
             // Check for messages from the gateway
@@ -123,41 +117,52 @@ impl HermesClient {
                     acp_text.push_str(&format!("[Media: {}]", media_desc.join(", ")));
                 }
 
-                // Reuse or create an ACP session for this user
-                let session_id = if let Some(sid) = sessions.get(&msg.from_user) {
-                    sid.clone()
-                } else {
-                    match acp.new_session(&self.config.hermes_cwd).await {
-                        Ok(sid) => {
-                            tracing::info!(
-                                "Created ACP session {} for user {}",
-                                sid,
-                                msg.from_user
-                            );
-                            sessions.insert(msg.from_user.clone(), sid.clone());
-                            sid
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to create ACP session for user {}: {}",
-                                msg.from_user,
-                                e
-                            );
-                            continue;
+                // Reuse session from gateway's cache or our local one
+                let session_id = match self.sessions.get(&msg.from_user) {
+                    Some(sid) => sid.clone(),
+                    None => {
+                        // Gateway gave us a session_id — use it
+                        if let Some(ref sid) = msg.session_id {
+                            self.sessions.insert(msg.from_user.clone(), sid.clone());
+                            sid.clone()
+                        } else {
+                            // First time — create a new session
+                            match acp.new_session(&self.config.hermes_cwd).await {
+                                Ok(sid) => {
+                                    tracing::info!(
+                                        "Created ACP session {} for user {}",
+                                        sid,
+                                        msg.from_user
+                                    );
+                                    self.sessions.insert(msg.from_user.clone(), sid.clone());
+                                    sid
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to create ACP session for user {}: {}",
+                                        msg.from_user,
+                                        e
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                     }
                 };
 
                 // Forward the message to Hermes
-                match acp
-                    .send_message(&session_id, &acp_text)
-                    .await
-                {
+                let from_user = msg.from_user.clone();
+                match acp.send_message(&session_id, &acp_text).await {
                     Ok(reply) => {
-                        // Send the reply back to the gateway
+                        // Send the reply back to the gateway.
+                        // Also report the session ID if we created it
+                        // (gateway already knows it via local cache or
+                        // poll response, but we send it in case this is
+                        // a new session).
+                        let report_session = self.sessions.get(&from_user).cloned();
                         if let Err(e) = self
                             .gateway
-                            .send_reply(&msg.id, &reply)
+                            .send_reply(&msg.id, &reply, report_session, Some(from_user.clone()))
                             .await
                         {
                             tracing::error!(
@@ -171,12 +176,11 @@ impl HermesClient {
                         tracing::error!(
                             "ACP error for session {} (user {}): {} — closing and removing",
                             session_id,
-                            msg.from_user,
+                            from_user,
                             e
                         );
-                        // Close the broken session and remove from cache
                         let _ = acp.close_session(&session_id).await;
-                        sessions.remove(&msg.from_user);
+                        self.sessions.remove(&from_user);
                     }
                 }
             }
@@ -215,6 +219,7 @@ mod tests {
         assert_eq!(client.config.agent_name, "hermes");
         assert_eq!(client.config.poll_interval_secs, 2);
         assert!(client.acp.is_none());
+        assert!(client.sessions.is_empty());
     }
 
     #[test]
@@ -335,6 +340,7 @@ mod tests {
             timestamp: 1700000000,
             context_token: "ctx-abc".to_string(),
             message_type: "text".to_string(),
+            session_id: None,
             media: vec![],
         };
 
@@ -348,6 +354,7 @@ mod tests {
         assert_eq!(deserialized.timestamp, 1700000000);
         assert_eq!(deserialized.context_token, "ctx-abc");
         assert_eq!(deserialized.message_type, "text");
+        assert!(deserialized.session_id.is_none());
         assert!(deserialized.media.is_empty());
     }
 
@@ -360,6 +367,7 @@ mod tests {
             timestamp: 1700000001,
             context_token: "ctx-def".to_string(),
             message_type: "text".to_string(),
+            session_id: None,
             media: vec![
                 crate::gateway::api::GatewayMediaItem {
                     media_type: "image".to_string(),

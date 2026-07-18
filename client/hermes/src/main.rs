@@ -119,17 +119,29 @@ async fn poll_loop(
                 acp_text.push_str(&format!("[Media: {}]", media_desc.join(", ")));
             }
 
-            // Create a new ACP session for this message
-            let session_id = acp.new_session(&config.hermes_cwd).await?;
-            tracing::debug!(session_id = %session_id, "Created ACP session");
+            // Reuse or create an ACP session for this user.
+            // Gateway provides session_id in poll response if cached.
+            let session_id = if let Some(ref sid) = msg.session_id {
+                sid.clone()
+            } else {
+                let sid = acp.new_session(&config.hermes_cwd).await?;
+                tracing::debug!(session_id = %sid, "Created new ACP session");
+                sid
+            };
 
             // Forward the message text to Hermes and collect the reply
             let reply = acp.send_message(&session_id, &acp_text).await?;
             tracing::debug!(session_id = %session_id, "Got reply from ACP");
 
-            // Send the reply back through the gateway (if non-empty)
+            // Send the reply back through the gateway (if non-empty).
+            // Include session_id so gateway caches it for restarts.
             if !reply.is_empty() {
-                gateway.send_reply(&msg.id, &reply).await?;
+                gateway.send_reply(
+                    &msg.id,
+                    &reply,
+                    Some(session_id.clone()),
+                    Some(msg.from_user.clone()),
+                ).await?;
                 tracing::debug!(msg_id = %msg.id, "Sent reply to gateway");
             }
 
@@ -302,7 +314,7 @@ mod tests {
             .await;
 
         let client = GatewayClient::new(&server.url(), "hermes").unwrap();
-        client.send_reply("msg1", "Hello back").await.unwrap();
+        client.send_reply("msg1", "Hello back", None, None).await.unwrap();
 
         mock.assert_async().await;
     }
@@ -347,7 +359,7 @@ mod tests {
             .await;
 
         let client = GatewayClient::new(&server.url(), "hermes").unwrap();
-        let err = client.send_reply("msg1", "Hello").await.unwrap_err();
+        let err = client.send_reply("msg1", "Hello", None, None).await.unwrap_err();
         assert!(
             matches!(err, ClientError::Gateway(_)),
             "expected Gateway error, got {:?}",

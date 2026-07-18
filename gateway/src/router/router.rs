@@ -5,6 +5,8 @@
 //! handles built-in commands (/use, /list, /status, /cmd),
 //! and dispatches agent replies back to iLink.
 
+use std::collections::HashMap;
+
 use crate::agents::queue::MessageQueue;
 use crate::agents::registry::AgentRegistry;
 use crate::error::{GatewayError, Result};
@@ -19,6 +21,9 @@ pub struct Router {
     queue: MessageQueue,
     active_agent: Option<String>,
     cmd_max_output_chars: usize,
+    /// Per-agent per-user ACP session IDs.
+    /// Key: agent_name → (from_user → acp_session_id)
+    agent_sessions: HashMap<String, HashMap<String, String>>,
 }
 
 impl Router {
@@ -29,7 +34,24 @@ impl Router {
             queue,
             active_agent: None,
             cmd_max_output_chars: 2000,
+            agent_sessions: HashMap::new(),
         }
+    }
+
+    /// Get the cached ACP session ID for an agent's user conversation.
+    pub fn get_session(&self, agent: &str, from_user: &str) -> Option<&str> {
+        self.agent_sessions
+            .get(agent)?
+            .get(from_user)
+            .map(|s| s.as_str())
+    }
+
+    /// Set or update the ACP session ID for an agent's user conversation.
+    pub fn set_session(&mut self, agent: &str, from_user: &str, session_id: String) {
+        self.agent_sessions
+            .entry(agent.to_string())
+            .or_default()
+            .insert(from_user.to_string(), session_id);
     }
 
     /// Set the maximum number of characters for `/cmd` command output.

@@ -18,6 +18,8 @@ pub struct GatewayMessage {
     pub context_token: String,
     pub message_type: String,
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub media: Vec<GatewayMediaItem>,
 }
 
@@ -46,6 +48,10 @@ struct ReplyRequest {
     text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     media_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acp_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acp_from_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,10 +181,20 @@ impl GatewayClient {
 
     /// Send a reply to a WeChat message through the gateway.
     ///
+    /// If `acp_session_id` and `acp_from_user` are provided, the gateway
+    /// records the ACP session ID for the user so it persists across
+    /// agent restarts.
+    ///
     /// # Errors
     ///
     /// Returns HTTP or gateway errors.
-    pub async fn send_reply(&self, reply_to_id: &str, text: &str) -> Result<()> {
+    pub async fn send_reply(
+        &self,
+        reply_to_id: &str,
+        text: &str,
+        acp_session_id: Option<String>,
+        acp_from_user: Option<String>,
+    ) -> Result<()> {
         let url = format!(
             "{}/api/agents/{}/reply",
             self.base_url, self.agent_name
@@ -188,6 +204,8 @@ impl GatewayClient {
             reply_to_id: reply_to_id.to_string(),
             text: text.to_string(),
             media_paths: vec![],
+            acp_session_id,
+            acp_from_user,
         };
 
         let resp = self
@@ -436,7 +454,7 @@ mod tests {
             .await;
 
         let client = GatewayClient::new(&server.url(), "hermes").unwrap();
-        client.send_reply("msg1", "Hello back").await.unwrap();
+        client.send_reply("msg1", "Hello back", None, None).await.unwrap();
 
         mock.assert_async().await;
     }
@@ -454,7 +472,7 @@ mod tests {
             .await;
 
         let client = GatewayClient::new(&server.url(), "hermes").unwrap();
-        let err = client.send_reply("msg1", "Hello back").await.unwrap_err();
+        let err = client.send_reply("msg1", "Hello back", None, None).await.unwrap_err();
         assert!(matches!(err, ClientError::Gateway(_)));
 
         mock.assert_async().await;
@@ -474,7 +492,7 @@ mod tests {
             .await;
 
         let client = GatewayClient::new(&server.url(), "hermes").unwrap();
-        let err = client.send_reply("msg1", "Hello back").await.unwrap_err();
+        let err = client.send_reply("msg1", "Hello back", None, None).await.unwrap_err();
         assert!(matches!(err, ClientError::Gateway(_)));
 
         mock.assert_async().await;
@@ -484,7 +502,7 @@ mod tests {
     async fn test_send_reply_handles_connection_refused() {
         let client =
             GatewayClient::new("http://127.0.0.1:1", "hermes").unwrap();
-        let err = client.send_reply("msg1", "Hello").await.unwrap_err();
+        let err = client.send_reply("msg1", "Hello", None, None).await.unwrap_err();
         assert!(matches!(err, ClientError::Gateway(_)));
     }
 }

@@ -291,7 +291,9 @@ impl AcpClient {
 
     /// Send a user message to a session and collect the complete reply text.
     ///
-    /// This sends a `session/prompt` request.
+    /// This sends a `session/prompt` request and collects text from
+    /// `session/update` notifications (`AgentMessageChunk`) that
+    /// arrive before the final `PromptResponse`.
     ///
     /// # Errors
     ///
@@ -310,26 +312,68 @@ impl AcpClient {
         };
         let params_value = serde_json::to_value(params)?;
 
-        // Send the prompt and get the response
-        let result = self
-            .send_request("session/prompt", Some(params_value))
-            .await?;
+        let id = self.next_request_id();
+        let msg = AcpMessage {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: "session/prompt".to_string(),
+            params: Some(params_value),
+        };
 
-        // Extract the response text — the ACP response contains a
-        // list of content blocks in the `prompt` field (since the
-        // PromptResponse schema mirrors the request's prompt field
-        // with agent content blocks), or a simple text field.
-        let reply_text = result
-            .get("prompt")
-            .and_then(|p| p.as_array())
-            .and_then(|blocks| blocks.first())
-            .and_then(|block| block.get("text"))
-            .and_then(|v| v.as_str())
-            .or_else(|| result.get("text").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
+        let request_line =
+            serde_json::to_string(&msg).map_err(ClientError::Serialize)?;
 
-        Ok(reply_text)
+        {
+            let mut stdin = self.stdin.lock().await;
+            writeln!(stdin, "{}", request_line).map_err(|e| {
+                ClientError::Acp(format!("Failed to write to ACP stdin: {}", e))
+            })?;
+            stdin.flush().map_err(|e| {
+                ClientError::Acp(format!("Failed to flush ACP stdin: {}", e))
+            })?;
+        }
+
+        // Read streaming lines: collect text from session/update
+        // notifications (AgentMessageChunk), stop at the final
+        // PromptResponse matching our request id.
+        let mut reply_texts: Vec<String> = Vec::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            {
+                let mut stdout = self.stdout.lock().await;
+                stdout.read_line(&mut line).map_err(|e| {
+                    ClientError::Acp(format!("Failed to read from ACP stdout: {}", e))
+                })?;
+            }
+
+            if line.is_empty() {
+                return Err(ClientError::AcpProcessExit(
+                    "ACP process closed stdout unexpectedly".to_string(),
+                ));
+            }
+
+            let v: serde_json::Value =
+                serde_json::from_str(line.trim()).map_err(ClientError::Serialize)?;
+
+            // If this is the final response matching our request id, stop
+            if v.get("id") == Some(&serde_json::json!(id)) {
+                break;
+            }
+
+            // Collect text from session/update → AgentMessageChunk → content → text
+            if let Some(text_content) = v
+                .get("params")
+                .and_then(|p| p.get("update"))
+                .and_then(|u| u.get("content"))
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str())
+            {
+                reply_texts.push(text_content.to_string());
+            }
+        }
+
+        Ok(reply_texts.join(""))
     }
 
     /// Close a session.
