@@ -67,7 +67,6 @@ pub fn build_router(state: AppState) -> Router {
 pub async fn start_server(
     config: &GatewayConfig,
     state: AppState,
-    shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let app = build_router(state).into_make_service();
     let addr = format!("{}:{}", config.http_addr, config.http_port);
@@ -81,7 +80,6 @@ pub async fn start_server(
     tracing::info!("HTTP server listening on {addr}");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
         .await
         .map_err(|e| {
             crate::error::GatewayError::Config(format!("HTTP server error: {e}"))

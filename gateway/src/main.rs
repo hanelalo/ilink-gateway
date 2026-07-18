@@ -70,16 +70,6 @@ async fn main() -> Result<()> {
 
     tracing::info!("starting wechat-gateway");
 
-    // 2c. Shutdown coordination (Ctrl+C / SIGTERM)
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-
-    // 2d. Signal handler — listens for Ctrl+C and triggers graceful shutdown
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("received Ctrl+C, shutting down gracefully...");
-        let _ = shutdown_tx.send(true);
-    });
-
     // 3. Open SQLite store (expand `~` in the db path)
     let db_path = expand_tilde(&config.db_path);
     tracing::info!("database path: {db_path}");
@@ -151,20 +141,15 @@ async fn main() -> Result<()> {
         })
     };
 
-    // 8. Spawn the HTTP API server with graceful shutdown
+    // 8. Spawn the HTTP API server
     let server_config = config.clone();
     let server_state = AppState {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
         ws_registry: ws_registry.clone(),
     };
-    let server_shutdown_rx = shutdown_rx.clone();
-    let server_signal = async move {
-        let mut rx = server_shutdown_rx;
-        let _ = rx.changed().await;
-    };
     tokio::spawn(async move {
-        if let Err(e) = start_server(&server_config, server_state, server_signal).await {
+        if let Err(e) = start_server(&server_config, server_state).await {
             tracing::error!("HTTP server error: {e}");
         }
     });
@@ -173,145 +158,134 @@ async fn main() -> Result<()> {
         "gateway started — entering long-poll loop (target: {base_url})"
     );
 
-    // 9. Main long-poll loop with graceful shutdown
+    // 9. Main long-poll loop
     let mut sync_buf = String::new();
     let current_token = token;
     let _current_base_url = base_url;
 
     loop {
-        tokio::select! {
-            biased;
-            _ = shutdown_rx.changed() => {
-                tracing::info!("shutdown signal received, exiting long-poll loop");
-                // reply_tx clones held by _state and server_state are dropped
-                // when those tasks are killed by the runtime on main() exit
-                break Ok(());
+        let resp = match client.get_updates(&sync_buf, Some(35)).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("get_updates error: {e}");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
             }
-            result = client.get_updates(&sync_buf, Some(35)) => {
-                let resp = match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!("get_updates error: {e}");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
+        };
 
-                // Handle errcode -14 (session timeout — temporary, not credential expiry).
-                // Sleep and retry; iLink sessions recover on their own.
-                if resp.errcode == Some(-14) {
-                    tracing::warn!("session timed out (errcode=-14); pausing 600s before retry");
-                    sync_buf = String::new();
-                    tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        // Handle errcode -14 (session timeout — temporary, not credential expiry).
+        // Sleep and retry; iLink sessions recover on their own.
+        if resp.errcode == Some(-14) {
+            tracing::warn!("session timed out (errcode=-14); pausing 600s before retry");
+            sync_buf = String::new();
+            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+            continue;
+        }
+
+        sync_buf = resp.get_updates_buf.unwrap_or(sync_buf);
+
+        if let Some(msgs) = resp.msgs {
+            for msg in msgs {
+                // Skip non-user messages
+                if !msg.is_user_message() {
                     continue;
                 }
 
-                sync_buf = resp.get_updates_buf.unwrap_or(sync_buf);
+                let (reply_text, active_agent) = {
+                    let mut router_guard = router_arc.lock().unwrap();
+                    let active = router_guard.active_agent().map(|s| s.to_string());
+                    let reply = router_guard.handle_incoming(&msg).unwrap_or_else(|e| {
+                        Some(format!("Error processing message: {e}"))
+                    });
+                    (reply, active)
+                };
 
-                if let Some(msgs) = resp.msgs {
-                    for msg in msgs {
-                        // Skip non-user messages
-                        if !msg.is_user_message() {
-                            continue;
-                        }
+                if let Some(text) = reply_text {
+                    let context_token = msg.context_token.unwrap_or_default();
+                    let to_user = msg.from_user_id.unwrap_or_default();
 
-                        let (reply_text, active_agent) = {
-                            let mut router_guard = router_arc.lock().unwrap();
-                            let active = router_guard.active_agent().map(|s| s.to_string());
-                            let reply = router_guard.handle_incoming(&msg).unwrap_or_else(|e| {
-                                Some(format!("Error processing message: {e}"))
-                            });
-                            (reply, active)
-                        };
+                    with_typing(
+                        &typing_ticket_cache,
+                        &client,
+                        &current_token,
+                        &to_user,
+                        async {
+                            let reply = crate::ilink::types::WeixinMessage::build_text_reply(
+                                context_token,
+                                to_user.clone(),
+                                text,
+                            );
+                            let send_req = SendMessageRequest {
+                                msg: reply,
+                                base_info: None,
+                            };
 
-                        if let Some(text) = reply_text {
-                            let context_token = msg.context_token.unwrap_or_default();
-                            let to_user = msg.from_user_id.unwrap_or_default();
-
-                            with_typing(
-                                &typing_ticket_cache,
-                                &client,
-                                &current_token,
-                                &to_user,
-                                async {
-                                    let reply = crate::ilink::types::WeixinMessage::build_text_reply(
-                                        context_token,
-                                        to_user.clone(),
-                                        text,
-                                    );
-                                    let send_req = SendMessageRequest {
-                                        msg: reply,
-                                        base_info: None,
-                                    };
-
-                                    if let Err(e) = client.send_message(&current_token, &send_req).await {
-                                        tracing::warn!("send_message error: {e}");
-                                    }
+                            if let Err(e) = client.send_message(&current_token, &send_req).await {
+                                tracing::warn!("send_message error: {e}");
+                            }
+                        },
+                    )
+                    .await;
+                } else {
+                    // Message was routed to agent queue — record context for reply lookup
+                    if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
+                        if let (Some(ctx), Some(user)) =
+                            (msg.context_token.clone(), msg.from_user_id.clone())
+                        {
+                            message_contexts.lock().unwrap().insert(
+                                msg_id.clone(),
+                                MessageContextInfo {
+                                    context_token: ctx,
+                                    to_user: user,
                                 },
-                            )
-                            .await;
-                        } else {
-                            // Message was routed to agent queue — record context for reply lookup
-                            if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
-                                if let (Some(ctx), Some(user)) =
-                                    (msg.context_token.clone(), msg.from_user_id.clone())
-                                {
-                                    message_contexts.lock().unwrap().insert(
-                                        msg_id.clone(),
-                                        MessageContextInfo {
-                                            context_token: ctx,
-                                            to_user: user,
-                                        },
-                                    );
-                                }
+                            );
+                        }
 
-                                // Download media from CDN if present and update the queue entry
-                                if let Some(ref agent) = active_agent {
-                                    if let Some(ref item_list) = msg.item_list {
-                                        let download_futures: Vec<_> = item_list
-                                            .iter()
-                                            .map(|item| {
-                                                try_download_media(&http_client, item, &msg_id, &cdn_base)
-                                            })
-                                            .collect();
-                                        let results: Vec<_> =
-                                            futures::future::join_all(download_futures).await;
-                                        let downloaded_media: Vec<MediaItem> = results
-                                            .into_iter()
-                                            .filter_map(|r| r)
-                                            .map(|(local_path, media_type, original_name)| MediaItem {
-                                                media_type,
-                                                local_path,
-                                                original_name,
-                                            })
-                                            .collect();
-                                        if !downloaded_media.is_empty() {
-                                            router_arc.lock().unwrap().queue()
-                                                .update_last_media(agent, downloaded_media)
-                                                .unwrap_or_else(|e| {
-                                                    tracing::warn!("update_last_media error: {e}");
-                                                });
-                                        }
-                                    }
+                        // Download media from CDN if present and update the queue entry
+                        if let Some(ref agent) = active_agent {
+                            if let Some(ref item_list) = msg.item_list {
+                                let download_futures: Vec<_> = item_list
+                                    .iter()
+                                    .map(|item| {
+                                        try_download_media(&http_client, item, &msg_id, &cdn_base)
+                                    })
+                                    .collect();
+                                let results: Vec<_> =
+                                    futures::future::join_all(download_futures).await;
+                                let downloaded_media: Vec<MediaItem> = results
+                                    .into_iter()
+                                    .filter_map(|r| r)
+                                    .map(|(local_path, media_type, original_name)| MediaItem {
+                                        media_type,
+                                        local_path,
+                                        original_name,
+                                    })
+                                    .collect();
+                                if !downloaded_media.is_empty() {
+                                    router_arc.lock().unwrap().queue()
+                                        .update_last_media(agent, downloaded_media)
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!("update_last_media error: {e}");
+                                        });
                                 }
-                            }
-
-                            // Try WebSocket push for real-time delivery to the active agent
-                            if let Some(ref agent) = active_agent {
-                                let msg_id = msg.message_id.map(|id| id.to_string()).unwrap_or_default();
-                                let ws_json = serde_json::json!({
-                                    "type": "message",
-                                    "id": msg_id,
-                                    "from_user": msg.from_user_id.clone().unwrap_or_default(),
-                                    "text": msg.text().unwrap_or(""),
-                                    "timestamp": msg.create_time_ms.unwrap_or(0),
-                                    "context_token": msg.context_token.clone().unwrap_or_default(),
-                                    "message_type": "text",
-                                })
-                                .to_string();
-                                ws_registry.push(agent, &ws_json);
                             }
                         }
+                    }
+
+                    // Try WebSocket push for real-time delivery to the active agent
+                    if let Some(ref agent) = active_agent {
+                        let msg_id = msg.message_id.map(|id| id.to_string()).unwrap_or_default();
+                        let ws_json = serde_json::json!({
+                            "type": "message",
+                            "id": msg_id,
+                            "from_user": msg.from_user_id.clone().unwrap_or_default(),
+                            "text": msg.text().unwrap_or(""),
+                            "timestamp": msg.create_time_ms.unwrap_or(0),
+                            "context_token": msg.context_token.clone().unwrap_or_default(),
+                            "message_type": "text",
+                        })
+                        .to_string();
+                        ws_registry.push(agent, &ws_json);
                     }
                 }
             }
