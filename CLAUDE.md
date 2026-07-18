@@ -13,7 +13,7 @@ This repository is indexed by CodeGraph. Use `codegraph_explore` (MCP tool) for 
 ## Build & Test
 
 ```bash
-# Build everything (workspace includes gateway + client/hermes)
+# Build gateway
 cargo build
 
 # Run all tests across workspace
@@ -21,9 +21,6 @@ cargo test
 
 # Run only gateway tests
 cargo test -p wechat-gateway
-
-# Run only hermes client tests
-cargo test -p wechat-gateway-client-hermes
 
 # Run a single test
 cargo test test_name
@@ -34,7 +31,7 @@ HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 cargo build
 
 ## Architecture
 
-Two Rust crates in a workspace, each with a binary entry point:
+Single Rust crate (gateway/) + Python Hermes message plugin (client/hermes-wechat-plugin/):
 
 ### `gateway/` — iLink WeChat message gateway (binary: `wechat-gateway`)
 
@@ -72,28 +69,26 @@ gateway/src/
 
 **Message flow**: WeChat → iLink long-poll → Router.handle_incoming() → parse command or enqueue to active agent's queue → agent polls via HTTP API → agent replies via POST reply → reply processor (channel-based) sends sendmessage back to WeChat. Media messages are extracted into `AgentMessage.media` with CDN download + AES-128-ECB decryption path.
 
-### `client/hermes/` — Hermes ACP client crate (binary: `wechat-gateway-client-hermes`)
+### `client/hermes-wechat-plugin/` — Hermes Message Plugin (Python)
 
-Agent-side client that connects to the gateway and forwards messages to Hermes via its ACP protocol.
+Hermes platform adapter that connects to the gateway as a registered agent:
 
 ```
-client/hermes/src/
-├── main.rs           # Binary entry: register → spawn ACP → poll loop (with media logging)
-├── gateway/api.rs    # HTTP client for gateway REST API (register, poll, reply, media-enabled)
-├── acp/client.rs     # JSON-RPC 2.0 client over stdio for Hermes ACP subprocess
-├── client.rs         # HermesClient orchestrator: register → poll loop → ACP session → reply
-├── config.rs         # Env-based client configuration
-└── error.rs          # ClientError enum
+client/hermes-wechat-plugin/
+├── adapter.py         # WeChatGatewayAdapter: register, poll, handle_message, send/reply
+├── plugin.yaml        # Plugin metadata (requires_env: WECHAT_GATEWAY_URL)
+└── __init__.py        # Exports register() entry point
 ```
 
-**ACP protocol**: Hermes' Agent Client Protocol runs `hermes acp` as a subprocess, communicating via JSON-RPC 2.0 over stdin/stdout. Key methods: `initialize` → `session/new` → `session/prompt` (streaming) → collect AgentMessageChunk from `session/update` notifications → `session/close`. Session recovery via `session/load`.
+**Adapter flow**: register with gateway → poll loop (1s interval) → convert messages to Hermes MessageEvent → forward to Hermes handle_message() → reply via POST reply (or proactive send with to_user for pairing codes).
+
+Symlink to Hermes: `ln -s ~/develop/wechat-gateway/client/hermes-wechat-plugin ~/.hermes/plugins/wechat-gateway`
 
 ## Testing
 
 Test-first development. Each module has `#[cfg(test)] mod tests` with unit tests.
 
 - Gateway tests use `mockito` for HTTP mocking (iLink endpoints) and `tempfile` for storage tests
-- ACP tests validate JSON-RPC serialization/deserialization with serde roundtrips
 - Command tests execute real shell commands via `tokio::process::Command`
 - Router tests construct `WeixinMessage` fixtures and verify routing decisions
 
@@ -107,14 +102,3 @@ Test-first development. Each module has `#[cfg(test)] mod tests` with unit tests
 | `GW_DB_PATH` | `~/.wechat-gateway/data.db` | SQLite database path |
 | `GW_CMD_TIMEOUT` | `30` | `/cmd` default timeout in seconds |
 | `GW_CMD_MAX_OUTPUT` | `2000` | `/cmd` max output chars |
-
-## Hermes Client Configuration (env vars)
-
-| Var | Default | Description |
-|-----|---------|-------------|
-| `GW_GATEWAY_URL` | `http://127.0.0.1:8765` | Gateway API URL |
-| `GW_AGENT_NAME` | `hermes` | Name to register with gateway |
-| `GW_HERMES_BIN` | `hermes` | Path to hermes executable |
-| `GW_HERMES_CWD` | cwd | Working dir for ACP sessions |
-| `GW_POLL_INTERVAL` | `1` | Poll interval in seconds |
-| `GW_ACP_TIMEOUT` | `300` | ACP session timeout in seconds |

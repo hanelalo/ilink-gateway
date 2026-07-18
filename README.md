@@ -16,10 +16,12 @@ WeChat ←── iLink Protocol ──→ wechat-gateway (Rust)
                            │  /cmd Executor   │
                            └────────┬────────┘
                                     │
-                ┌───────────────────┼───────────────────┐
-                │                   │                   │
-            Hermes              OpenClaw            ...(agent)
-         (HTTP polling)       (HTTP polling)       (HTTP polling)
+                           ┌────────┴────────┐
+                           │ Hermes Plugin    │
+                           │ (Python, poll)   │
+                           └────────┬────────┘
+                                    │
+                               Hermes Agent
 ```
 
 **Core principles:**
@@ -53,11 +55,10 @@ wechat-gateway/
 │       ├── storage/         # SQLite credential persistence
 │       └── config.rs
 │
-├── client/hermes/           # Hermes ACP client (Rust crate)
-│   └── src/
-│       ├── gateway/api.rs   # Gateway API client (with media support)
-│       ├── acp/client.rs    # Hermes ACP JSON-RPC communication
-│       └── client.rs        # Main orchestrator loop
+├── client/hermes-wechat-plugin/  # Hermes message plugin (Python)
+│   ├── adapter.py           # WeChatGatewayAdapter (register/poll/handle_message/reply)
+│   ├── plugin.yaml          # Plugin metadata
+│   └── __init__.py          # Exports register() entry point
 │
 └── docs/
 ```
@@ -123,12 +124,9 @@ cargo test
 
 # Run gateway tests only
 cargo test -p wechat-gateway
-
-# Run Hermes client tests only
-cargo test -p wechat-gateway-client-hermes
 ```
 
-> **Note**: All modules have complete unit test coverage (~190 gateway tests, ~50 hermes client tests).
+> **Note**: All gateway modules have complete unit test coverage (~440 tests).
 
 ### Registering an Agent
 
@@ -168,12 +166,6 @@ The gateway is configured via environment variables:
 | `GW_DB_PATH` | `~/.wechat-gateway/data.db` | SQLite database path |
 | `GW_CMD_TIMEOUT` | `30` | `/cmd` default timeout (seconds) |
 | `GW_CMD_MAX_OUTPUT` | `2000` | `/cmd` max output characters |
-| `GW_GATEWAY_URL` | `http://127.0.0.1:8765` | Hermes client gateway URL |
-| `GW_AGENT_NAME` | `hermes` | Hermes registration name |
-| `GW_HERMES_BIN` | `hermes` | Hermes executable path |
-| `GW_HERMES_CWD` | current dir | ACP session working directory |
-| `GW_POLL_INTERVAL` | `1` | Poll interval (seconds) |
-| `GW_ACP_TIMEOUT` | `300` | ACP session timeout (seconds) |
 
 ## iLink Protocol Overview
 

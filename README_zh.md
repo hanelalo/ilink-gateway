@@ -16,10 +16,12 @@ WeChat ←── iLink 协议 ──→ wechat-gateway (Rust)
                       │  /cmd Executor   │
                       └────────┬────────┘
                                │
-              ┌────────────────┼────────────────┐
-              │                │                │
-          Hermes            OpenClaw          ...(agent)
-        (HTTP 轮询)       (HTTP 轮询)        (HTTP 轮询)
+                      ┌────────┴────────┐
+                      │ Hermes Plugin    │
+                      │ (Python, poll)   │
+                      └────────┬────────┘
+                               │
+                          Hermes Agent
 ```
 
 **核心设计原则：**
@@ -53,11 +55,10 @@ wechat-gateway/
 │       ├── storage/         # SQLite 凭证持久化
 │       └── config.rs
 │
-├── client/hermes/           # Hermes ACP 客户端 (Rust crate)
-│   └── src/
-│       ├── gateway/api.rs   # 网关 API 客户端 (支持媒体)
-│       ├── acp/client.rs    # Hermes ACP JSON-RPC 通信
-│       └── client.rs        # 主循环编排
+├── client/hermes-wechat-plugin/  # Hermes 消息插件 (Python)
+│   ├── adapter.py           # WeChatGatewayAdapter (register/poll/handle_message/reply)
+│   ├── plugin.yaml          # 插件元数据
+│   └── __init__.py          # 导出 register() 入口
 │
 └── docs/
 ```
@@ -123,12 +124,9 @@ cargo test
 
 # 仅运行网关测试
 cargo test -p wechat-gateway
-
-# 仅运行 Hermes 客户端测试
-cargo test -p wechat-gateway-client-hermes
 ```
 
-> **注意**: 所有模块都有完整的单元测试覆盖（约 190 个 gateway 测试，约 50 个 hermes 客户端测试）。
+> **注意**: 所有模块都有完整的单元测试覆盖（约 440 个 gateway 测试）。
 
 ### 注册 Agent
 
@@ -175,12 +173,6 @@ curl http://127.0.0.1:8765/api/status
 | `GW_DB_PATH` | `~/.wechat-gateway/data.db` | 数据库路径 |
 | `GW_CMD_TIMEOUT` | `30` | `/cmd` 默认超时(秒) |
 | `GW_CMD_MAX_OUTPUT` | `2000` | `/cmd` 最大输出字符数 |
-| `GW_GATEWAY_URL` | `http://127.0.0.1:8765` | Hermes 客户端连接的网关地址 |
-| `GW_AGENT_NAME` | `hermes` | Hermes 注册名 |
-| `GW_HERMES_BIN` | `hermes` | hermes 可执行文件路径 |
-| `GW_HERMES_CWD` | 当前目录 | ACP 会话工作目录 |
-| `GW_POLL_INTERVAL` | `1` | 轮询间隔(秒) |
-| `GW_ACP_TIMEOUT` | `300` | ACP 会话超时(秒) |
 
 ## iLink 协议要点
 

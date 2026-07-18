@@ -646,9 +646,9 @@ Hermes ACP 支持通过 `session/prompt` 发送斜杠命令，在本地处理而
 
 ---
 
-## 8. 完整对接示例（Rust）
+## 8. 完整对接示例
 
-参考 `wechat-gateway/client/hermes/src/acp/client.rs` 的实现：
+ACP 协议的基本对接流程如下：
 
 ```rust
 use std::io::{BufRead, BufReader, Write};
@@ -809,4 +809,3 @@ pip install -e '.[acp]'
 - ACP 协议源码：`acp_adapter/`（`~/.hermes/hermes-agent/acp_adapter/`）
 - ACP 协议包：`acp` Python 包（`venv/lib/python3.11/site-packages/acp/`）
 - Hermes ACP 文档：`https://hermes-agent.nousresearch.com/docs/`
-- 实际客户端实现：`wechat-gateway/client/hermes/src/acp/client.rs`
