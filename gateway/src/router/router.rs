@@ -52,21 +52,24 @@ impl Router {
     ///
     /// Restores active_agent and all agent session mappings.
     pub fn load_state(&mut self, store: &SqliteStore) {
-        // Restore active agent
+        // Restore active agent (may reference an agent not yet registered)
         if let Ok(Some(agent)) = store.get_state(KEY_ACTIVE_AGENT) {
-            if self.registry.contains(&agent) {
-                self.active_agent = Some(agent);
-            }
+            self.active_agent = Some(agent);
         }
 
-        // Restore session mappings for each registered agent
-        for agent in self.registry.list() {
-            let key = sessions_key(&agent.name);
-            if let Ok(Some(json)) = store.get_state(&key) {
-                if let Ok(sessions) =
-                    serde_json::from_str::<HashMap<String, String>>(&json)
-                {
-                    self.agent_sessions.insert(agent.name.clone(), sessions);
+        // Restore all persisted session mappings (keys look like "sessions:*")
+        // Walk all gateway_state keys to find session entries.
+        if let Ok(keys) = store.get_state_keys_with_prefix("sessions:") {
+            for key in keys {
+                if let Some(agent_name) = key.strip_prefix("sessions:") {
+                    if let Ok(Some(json)) = store.get_state(&key) {
+                        if let Ok(sessions) =
+                            serde_json::from_str::<HashMap<String, String>>(&json)
+                        {
+                            self.agent_sessions
+                                .insert(agent_name.to_string(), sessions);
+                        }
+                    }
                 }
             }
         }
