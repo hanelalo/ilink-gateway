@@ -28,6 +28,13 @@ impl SqliteStore {
     ///
     /// Creates the `credentials` table on first access.
     pub fn new(path: &str) -> Result<Self> {
+        // Ensure parent directory exists
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| GatewayError::Storage(format!("Failed to create database directory: {e}")))?;
+            }
+        }
         let conn = Connection::open(path)
             .map_err(|e| GatewayError::Storage(format!("Failed to open database: {e}")))?;
         conn.execute_batch(
