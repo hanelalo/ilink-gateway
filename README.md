@@ -16,12 +16,14 @@ WeChat ←── iLink Protocol ──→ wechat-gateway (Rust)
                            │  /cmd Executor   │
                            └────────┬────────┘
                                     │
-                           ┌────────┴────────┐
-                           │ Hermes Plugin    │
-                           │ (Python, poll)   │
-                           └────────┬────────┘
-                                    │
-                               Hermes Agent
+                    ┌───────────────┴───────────────┐
+                    │                               │
+            Hermes Plugin                    Claude Adapter
+            (Python, poll)                 (Node.js, poll)
+                    │                               │
+               Hermes Agent           @anthropic-ai/claude-agent-sdk
+                                               │
+                                          Claude Code
 ```
 
 **Core principles:**
@@ -60,6 +62,19 @@ wechat-gateway/
 │   ├── plugin.yaml          # Plugin metadata
 │   └── __init__.py          # Exports register() entry point
 │
+├── client/claude-code-adapter/  # Claude Code adapter (Node.js/TypeScript)
+│   └── src/
+│       ├── index.ts             # Entry: register → poll loop → message routing
+│       ├── claude-session.ts    # Claude SDK query() wrapper
+│       ├── gateway-client.ts    # Gateway HTTP client
+│       ├── session-store.ts     # Session persistence (wxid → cwd → sessionId)
+│       ├── query-manager.ts     # Runtime query state management
+│       ├── approval.ts          # Tool approval command parsing
+│       ├── cd-command.ts        # /cd workspace switching
+│       ├── formatter.ts         # Markdown → plain text
+│       ├── streaming-batcher.ts # Stream batching, idle alert, long reply split
+│       └── config.ts            # Env config loader
+│
 └── docs/
 ```
 
@@ -82,6 +97,7 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 ### Features
 
+- **Dual agent support** — gateway supports multiple registered agents. Switch between them via `/use <name>` in WeChat (e.g., `/use claude`, `/use hermes`)
 - **Heartbeat detection** — gateway auto-detects offline agents via poll timestamps (30s check, 60s timeout)
 - **Media support** — image/voice/video/file, AES-128-ECB CDN encrypt on send, decrypt on receive
 - **Reply channel** — async reply processing via tokio mpsc, separates HTTP API from iLink sending
@@ -104,6 +120,8 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 - A WeChat account (for QR code login)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/) installed (for the plugin path)
 - Python 3.10+ with `aiohttp`
+- Node.js 20+ (for Claude Code Adapter)
+- [Claude Code](https://claude.ai/code) CLI (for Claude Code Adapter)
 
 ### 1. Build and Run the Gateway
 
@@ -177,14 +195,49 @@ hermes pairing approve <wxid> wechat_gateway
 
 Hermes sends the pairing code back through the gateway to you on WeChat. After pairing, messages are handled normally — including all slash commands like `/new`.
 
+### 5. Start the Claude Code Adapter (Alternative Agent)
+
+The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. To use it alongside or instead of Hermes:
+
+```bash
+cd client/claude-code-adapter
+
+# Install dependencies
+npm install
+
+# Run
+npx tsx src/index.ts
+```
+
+The adapter registers itself as `claude` agent with the gateway. Switch between agents from WeChat:
+
+```
+/use claude    → 切换到 Claude Code
+/use hermes    → 切换回 Hermes
+```
+
+From WeChat, you can then interact with Claude Code:
+
+```
+/cd              → 查看 workspace
+/cd wiki         → 切换到 wiki 目录
+/approve on      → 开启自动审批
+帮我分析这个项目  → 消息会发送给 Claude Code
+```
+
+See [client/claude-code-adapter/README.md](./client/claude-code-adapter/README.md) for full documentation.
+
 ### Run Tests
 
 ```bash
-# Run all tests across the workspace
+# Run all Rust tests
 cargo test
 
 # Run gateway tests only
 cargo test -p wechat-gateway
+
+# Run Claude Code Adapter tests
+cd client/claude-code-adapter && npm test
 ```
 
 > **Note**: All gateway modules have complete unit test coverage (~440 tests).

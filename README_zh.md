@@ -16,20 +16,23 @@ WeChat ←── iLink 协议 ──→ wechat-gateway (Rust)
                       │  /cmd Executor   │
                       └────────┬────────┘
                                │
-                      ┌────────┴────────┐
-                      │ Hermes Plugin    │
-                      │ (Python, poll)   │
-                      └────────┬────────┘
-                               │
-                          Hermes Agent
+                      ┌────────┴──────────┐
+                      │                  │
+              Hermes Plugin        Claude Adapter
+              (Python, poll)     (Node.js, poll)
+                      │                  │
+                 Hermes Agent  @anthropic-ai/claude-agent-sdk
+                                         │
+                                    Claude Code
 ```
 
 **核心设计原则：**
 
 - **Gateway 是中心** — 维护微信 iLink 独占长轮询连接
 - **Agent 主动注册** — agent 启动时通过 HTTP 注册到 gateway，带上名字
-- **`/use <name>` 切换** — 微信内发消息切换当前激活的 agent
+- **`/use <name>` 切换** — 微信内发消息切换当前激活的 agent（如 `/use claude`、`/use hermes`）
 - **`/cmd <shell>` 执行** — 微信内直接执行 shell 命令
+- **双 Agent 支持** — Hermes（Python）和 Claude Code（Node.js）可同时注册，按需切换
 
 ## 项目结构
 
@@ -60,6 +63,19 @@ wechat-gateway/
 │   ├── plugin.yaml          # 插件元数据
 │   └── __init__.py          # 导出 register() 入口
 │
+├── client/claude-code-adapter/  # Claude Code 适配器 (Node.js/TypeScript)
+│   └── src/
+│       ├── index.ts             # 入口：注册 → 轮询 → 消息路由
+│       ├── claude-session.ts    # Claude SDK query() 封装
+│       ├── gateway-client.ts    # Gateway HTTP 客户端
+│       ├── session-store.ts     # 会话持久化 (wxid → cwd → sessionId)
+│       ├── query-manager.ts     # 运行时查询状态管理
+│       ├── approval.ts          # 工具审批命令解析
+│       ├── cd-command.ts        # /cd 工作目录切换
+│       ├── formatter.ts         # Markdown 转纯文本
+│       ├── streaming-batcher.ts # 流式合批、空闲提示、长回复分段
+│       └── config.ts            # 环境变量加载
+│
 └── docs/
 ```
 
@@ -82,6 +98,7 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 ### 功能特性
 
+- **双 Agent 支持** — 网关支持多个已注册 agent，通过微信 `/use <name>` 切换
 - **Agent 心跳检测** — 通过 poll 时间戳自动检测离线 agent（30 秒检查, 60 秒超时）
 - **媒体消息支持** — 图片/语音/视频/文件类型，AES-128-ECB CDN 加解密
 - **回复通道** — 异步回复处理，通过 tokio mpsc 通道分离 HTTP API 和 iLink 发送
@@ -104,6 +121,8 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 - 一个微信账号（用于扫码登录）
 - 已安装 [Hermes Agent](https://hermes-agent.nousresearch.com/)
 - Python 3.10+ 并安装 `aiohttp`
+- Node.js 20+（用于 Claude Code Adapter）
+- [Claude Code](https://claude.ai/code) CLI（用于 Claude Code Adapter）
 
 ### 1. 构建并启动网关
 
@@ -177,14 +196,49 @@ hermes pairing approve <wxid> wechat_gateway
 
 Hermes 会通过 gateway 将配对码发回你的微信。配对完成后，消息正常处理，所有斜杠命令（如 `/new`）均可用。
 
+### 5. 启动 Claude Code Adapter（备选 Agent）
+
+Claude Code Adapter 是独立的 agent（Node.js/TypeScript），它连接到 Claude Code 而不是 Hermes。可与 Hermes 并行或替代使用：
+
+```bash
+cd client/claude-code-adapter
+
+# 安装依赖
+npm install
+
+# 运行
+npx tsx src/index.ts
+```
+
+该适配器以 `claude` 名称注册到网关。在微信中切换 agent：
+
+```
+/use claude    → 切换到 Claude Code
+/use hermes    → 切换回 Hermes
+```
+
+在微信中与 Claude Code 交互：
+
+```
+/cd              → 查看 workspace
+/cd wiki         → 切换到 wiki 目录
+/approve on      → 开启自动审批
+帮我分析这个项目  → 消息发送给 Claude Code
+```
+
+完整文档见 `client/claude-code-adapter/README.md`。
+
 ### 运行测试
 
 ```bash
-# 运行全部测试
+# 运行全部 Rust 测试
 cargo test
 
 # 仅运行网关测试
 cargo test -p wechat-gateway
+
+# 运行 Claude Code Adapter 测试
+cd client/claude-code-adapter && npm test
 ```
 
 > **注意**: 所有模块都有完整的单元测试覆盖（约 440 个 gateway 测试）。

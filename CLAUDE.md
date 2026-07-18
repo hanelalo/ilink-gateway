@@ -2,15 +2,25 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 语言要求
+## Language
 
-所有回答必须使用中文。
+All responses must be in Chinese (中文).
+
+## Documentation Management (Mandatory)
+
+This repository requires that all `README.md` files have a synchronized Chinese version.
+
+- **Creation rule**: When creating a `README.md` in any directory, you must also create a `README_zh.md` in the same directory as the Chinese version
+- **Update rule**: When updating a `README.md`, you must update the corresponding `README_zh.md` in the same directory, keeping both documents consistent
+- **Content rule**: `README_zh.md` must follow the same structure and sections as `README.md`, differing only in language
 
 ## Code Navigation
 
 This repository is indexed by CodeGraph. Use `codegraph_explore` (MCP tool) for code understanding and navigation — prefer it over grep/find/Read for symbol lookup, architecture questions, and relationship discovery. A single call returns the verbatin source of all relevant symbols plus the call paths between them.
 
 ## Build & Test
+
+### Rust Gateway
 
 ```bash
 # Build gateway
@@ -29,9 +39,27 @@ cargo test test_name
 HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 cargo build
 ```
 
+### Claude Code Adapter (Node.js/TypeScript)
+
+```bash
+cd client/claude-code-adapter
+
+# Install dependencies
+npm install
+
+# Run tests (vitest)
+npm test
+
+# Watch mode
+npm run test:watch
+
+# Run in development
+npm run dev
+```
+
 ## Architecture
 
-Single Rust crate (gateway/) + Python Hermes message plugin (client/hermes-wechat-plugin/):
+Two main components: Rust gateway (`gateway/`) + two agent implementations (`client/`):
 
 ### `gateway/` — iLink WeChat message gateway (binary: `wechat-gateway`)
 
@@ -83,6 +111,30 @@ client/hermes-wechat-plugin/
 **Adapter flow**: register with gateway → poll loop (1s interval) → convert messages to Hermes MessageEvent → forward to Hermes handle_message() → reply via POST reply (or proactive send with to_user for pairing codes).
 
 Symlink to Hermes: `ln -s ~/develop/wechat-gateway/client/hermes-wechat-plugin ~/.hermes/plugins/wechat-gateway`
+
+### `client/claude-code-adapter/` — Claude Code Adapter (Node.js/TypeScript)
+
+Claude Code agent that bridges WeChat messages to the `@anthropic-ai/claude-agent-sdk`, allowing users to interact with Claude Code through WeChat:
+
+```
+client/claude-code-adapter/src/
+├── index.ts              # Entry: register → poll loop → message routing
+├── streaming-batcher.ts  # Stream batching (1500 chars / 2s idle), 30s idle alert, long reply splitting (3800 chars)
+├── session-store.ts      # Session persistence: wxid → cwd → sessionId (JSON file)
+├── query-manager.ts      # Runtime query state: Map<wxid, Map<cwd, RunningQuery>>
+├── claude-session.ts     # Claude SDK query() wrapper: message iteration, canUseTool, env setup
+├── approval.ts           # Tool approval: /approve, /deny, /approve session, /approve on/off
+├── formatter.ts          # Markdown → plain text for WeChat compatibility
+├── cd-command.ts         # /cd command: workspace switching, alias management, path resolution
+├── gateway-client.ts     # HTTP client: register, poll, reply, sendProactive
+└── config.ts             # Environment variable loading
+```
+
+**Adapter flow**: register with gateway → poll loop (1s) → route messages:
+- `/cd`, `/approve`, `/deny` commands handled directly
+- Other text → start/resume Claude Code session via SDK `query()` → stream reply back via POST reply
+- Multiple wxid × cwd pairs have independent sessions (parallel execution)
+- Tool approval via WeChat prompts (`/approve`/`/deny`), with session whitelist and auto-mode support
 
 ## Testing
 
