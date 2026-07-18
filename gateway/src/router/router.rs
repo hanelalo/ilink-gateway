@@ -14,6 +14,16 @@ use crate::ilink::types::{
     msg_type, AgentMessage, MediaItem, QueuedMessage, RouterCommand, WeixinMessage,
 };
 use crate::router::commands::{execute_command, is_dangerous_command, parse_command};
+use crate::storage::sqlite_store::SqliteStore;
+
+/// State keys used in the gateway_state table.
+const KEY_ACTIVE_AGENT: &str = "active_agent";
+
+/// Persist all agent_sessions for a given agent as one JSON blob under
+/// "session:{agent_name}".
+fn sessions_key(agent: &str) -> String {
+    format!("sessions:{}", agent)
+}
 
 /// Central message router that coordinates message handling.
 pub struct Router {
@@ -35,6 +45,48 @@ impl Router {
             active_agent: None,
             cmd_max_output_chars: 2000,
             agent_sessions: HashMap::new(),
+        }
+    }
+
+    /// Load persisted state from the SQLite store.
+    ///
+    /// Restores active_agent and all agent session mappings.
+    pub fn load_state(&mut self, store: &SqliteStore) {
+        // Restore active agent
+        if let Ok(Some(agent)) = store.get_state(KEY_ACTIVE_AGENT) {
+            if self.registry.contains(&agent) {
+                self.active_agent = Some(agent);
+            }
+        }
+
+        // Restore session mappings for each registered agent
+        for agent in self.registry.list() {
+            let key = sessions_key(&agent.name);
+            if let Ok(Some(json)) = store.get_state(&key) {
+                if let Ok(sessions) =
+                    serde_json::from_str::<HashMap<String, String>>(&json)
+                {
+                    self.agent_sessions.insert(agent.name.clone(), sessions);
+                }
+            }
+        }
+    }
+
+    /// Persist current state to the SQLite store.
+    ///
+    /// Saves active_agent and all agent session mappings.
+    pub fn persist_state(&self, store: &SqliteStore) {
+        // Save active agent
+        if let Some(ref agent) = self.active_agent {
+            let _ = store.set_state(KEY_ACTIVE_AGENT, agent);
+        }
+
+        // Save session mappings for all agents
+        for (agent_name, sessions) in &self.agent_sessions {
+            let key = sessions_key(agent_name);
+            if let Ok(json) = serde_json::to_string(sessions) {
+                let _ = store.set_state(&key, &json);
+            }
         }
     }
 

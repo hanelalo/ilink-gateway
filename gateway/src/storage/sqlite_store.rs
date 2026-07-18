@@ -18,7 +18,7 @@ pub struct StoredCredentials {
     pub saved_at: String,
 }
 
-/// SQLite-backed credential store.
+/// SQLite-backed credential and state store.
 pub struct SqliteStore {
     conn: Connection,
 }
@@ -26,7 +26,7 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open or create the database at the given path.
     ///
-    /// Creates the `credentials` table on first access.
+    /// Creates the `credentials` and `gateway_state` tables on first access.
     pub fn new(path: &str) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -45,6 +45,10 @@ impl SqliteStore {
                 base_url    TEXT NOT NULL,
                 user_id     TEXT NOT NULL,
                 saved_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS gateway_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )",
         )
         .map_err(|e| GatewayError::Storage(format!("Failed to create schema: {e}")))?;
@@ -106,6 +110,45 @@ impl SqliteStore {
         self.conn
             .execute("DELETE FROM credentials", [])
             .map_err(|e| GatewayError::Storage(format!("Failed to delete credentials: {e}")))?;
+        Ok(())
+    }
+
+    // ─── Gateway state ─────────────────────────────────────────────
+
+    /// Get a gateway state value by key.
+    pub fn get_state(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM gateway_state WHERE key = ?1")
+            .map_err(|e| GatewayError::Storage(format!("Failed to prepare state query: {e}")))?;
+
+        match stmt.query_row(rusqlite::params![key], |row| row.get(0)) {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(GatewayError::Storage(format!(
+                "Failed to load state '{}': {}",
+                key, e
+            ))),
+        }
+    }
+
+    /// Set a gateway state key-value pair (upsert).
+    pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO gateway_state (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            )
+            .map_err(|e| GatewayError::Storage(format!("Failed to set state '{}': {}", key, e)))?;
+        Ok(())
+    }
+
+    /// Delete a gateway state key.
+    #[allow(dead_code)]
+    pub fn delete_state(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM gateway_state WHERE key = ?1", rusqlite::params![key])
+            .map_err(|e| GatewayError::Storage(format!("Failed to delete state '{}': {}", key, e)))?;
         Ok(())
     }
 }

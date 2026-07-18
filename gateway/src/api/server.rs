@@ -23,6 +23,7 @@ use crate::config::GatewayConfig;
 use crate::error::Result;
 use crate::ilink::types::{AgentReply, AgentStatus};
 use crate::router::router::Router as InternalRouter;
+use crate::storage::sqlite_store::SqliteStore;
 
 // ─── Request types ──────────────────────────────────────────────────────────
 
@@ -52,6 +53,7 @@ pub struct AppState {
     pub router: Arc<Mutex<InternalRouter>>,
     pub reply_tx: UnboundedSender<AgentReply>,
     pub ws_registry: WsRegistry,
+    pub store: Arc<Mutex<SqliteStore>>,
 }
 
 // ─── Router builder ─────────────────────────────────────────────────────────
@@ -104,7 +106,17 @@ pub async fn handle_register(
 
     match registry.register(&body.name, None, &body.capabilities) {
         Ok(()) => {
+            // If no active agent is set yet, make this one active
+            if router.active_agent().is_none() {
+                let _ = router.set_active_agent(&body.name);
+            }
             let active = router.active_agent().map(|s| s.to_string());
+
+            // Persist state
+            if let Ok(store) = state.store.lock() {
+                router.persist_state(&store);
+            }
+
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -193,6 +205,9 @@ pub async fn handle_reply(
     {
         let mut router = state.router.lock().unwrap();
         router.set_session(&name, &from_user, session_id);
+        if let Ok(store) = state.store.lock() {
+            router.persist_state(&store);
+        }
     }
 
     // Send reply through channel
@@ -263,6 +278,9 @@ mod tests {
             ))),
             reply_tx,
             ws_registry: WsRegistry::new(),
+            store: Arc::new(Mutex::new(
+                crate::storage::sqlite_store::SqliteStore::new(":memory:").unwrap(),
+            )),
         }
     }
 
@@ -373,6 +391,9 @@ mod tests {
             ))),
             reply_tx,
             ws_registry: WsRegistry::new(),
+            store: Arc::new(Mutex::new(
+                crate::storage::sqlite_store::SqliteStore::new(":memory:").unwrap(),
+            )),
         });
 
         let (_status, _json) = post_json(&state, "/api/agents/hermes/reply", serde_json::json!({

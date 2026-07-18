@@ -81,7 +81,11 @@ async fn main() -> Result<()> {
     let mut router = Router::new(registry, queue);
     router.set_cmd_max_output_chars(config.cmd_max_output_chars);
 
+    // 4b. Restore persisted state (active_agent, session IDs)
+    router.load_state(&store);
+
     // 5. Build AppState for the HTTP API
+    let store_arc = Arc::new(Mutex::new(store));
     let router_arc = Arc::new(Mutex::new(router));
 
     // Create reply channel, message context store, and WebSocket registry
@@ -95,13 +99,15 @@ async fn main() -> Result<()> {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
         ws_registry: ws_registry.clone(),
+        store: store_arc.clone(),
     };
 
     // 5b. Spawn heartbeat checker (every 30s, timeout 60s)
     spawn_heartbeat_checker(router_arc.clone(), 30, 60);
 
     // 6. Load saved iLink credentials or run QR-code login
-    let (token, base_url) = match store.load_credentials()? {
+    let store_lock = store_arc.lock().unwrap();
+    let (token, base_url) = match store_lock.load_credentials()? {
         Some(creds) => {
             tracing::info!("loaded saved iLink credentials for account {}", creds.account_id);
             (creds.token, creds.base_url)
@@ -109,7 +115,7 @@ async fn main() -> Result<()> {
         None => {
             tracing::info!("no saved credentials found; starting QR code login");
             let client = IlinkClient::new(Some(config.ilink_base_url.clone()))?;
-            qr_login_and_save(&client, &store).await?
+            qr_login_and_save(&client, &store_lock).await?
         }
     };
 
@@ -147,6 +153,7 @@ async fn main() -> Result<()> {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
         ws_registry: ws_registry.clone(),
+        store: store_arc.clone(),
     };
     tokio::spawn(async move {
         if let Err(e) = start_server(&server_config, server_state).await {
