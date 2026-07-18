@@ -12,6 +12,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use std::time::Duration;
 
 /// HTTP client for the WeChat iLink Bot API.
 pub struct Client {
@@ -35,6 +36,8 @@ fn generate_uin() -> String {
 /// Every iLink request carries:
 /// - `AuthorizationType: ilink_bot_token`
 /// - `X-WECHAT-UIN: <base64(random_u32_string)>`  (unique per call)
+/// - `iLink-App-Id: bot`
+/// - `iLink-App-ClientVersion: 131584`  = (2<<16)|(2<<8)|0
 /// - `Authorization: Bearer <token>`               (only when `token` is `Some`)
 fn build_headers(token: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -47,6 +50,20 @@ fn build_headers(token: Option<&str>) -> HeaderMap {
     headers.insert(
         "X-WECHAT-UIN".parse::<reqwest::header::HeaderName>().unwrap(),
         HeaderValue::from_str(&generate_uin()).unwrap(),
+    );
+
+    headers.insert(
+        "iLink-App-Id"
+            .parse::<reqwest::header::HeaderName>()
+            .unwrap(),
+        HeaderValue::from_static("bot"),
+    );
+
+    headers.insert(
+        "iLink-App-ClientVersion"
+            .parse::<reqwest::header::HeaderName>()
+            .unwrap(),
+        HeaderValue::from_static("131584"),
     );
 
     if let Some(token) = token {
@@ -85,7 +102,12 @@ impl Client {
     ///
     /// When `base_url` is `None` the default [`ILINK_BASE_URL`] is used.
     pub fn new(base_url: Option<String>) -> Result<Self> {
-        let client = reqwest::Client::builder().build()?;
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            // Global request timeout — must exceed the 35s getupdates long-poll
+            // hold so the server can return naturally.
+            .timeout(Duration::from_secs(90))
+            .build()?;
         let base_url = base_url.unwrap_or_else(|| ILINK_BASE_URL.to_string());
         Ok(Client { client, base_url })
     }
@@ -139,7 +161,7 @@ impl Client {
         let url = format!("{}/ilink/bot/getupdates", self.base_url);
         let body = GetUpdatesRequest {
             get_updates_buf: sync_buf.to_string(),
-            base_info: None,
+            base_info: Some(BaseInfo::channel_default()),
             timeout,
         };
         let resp = self
@@ -162,11 +184,15 @@ impl Client {
         req: &SendMessageRequest,
     ) -> Result<SendMessageResponse> {
         let url = format!("{}/ilink/bot/sendmessage", self.base_url);
+        let mut req = req.clone();
+        if req.base_info.is_none() {
+            req.base_info = Some(BaseInfo::channel_default());
+        }
         let resp = self
             .client
             .post(&url)
             .headers(build_headers(Some(token)))
-            .json(req)
+            .json(&req)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -184,11 +210,15 @@ impl Client {
         req: &SendTypingRequest,
     ) -> Result<()> {
         let url = format!("{}/ilink/bot/sendtyping", self.base_url);
+        let mut req = req.clone();
+        if req.base_info.is_none() {
+            req.base_info = Some(BaseInfo::channel_default());
+        }
         let resp = self
             .client
             .post(&url)
             .headers(build_headers(Some(token)))
-            .json(req)
+            .json(&req)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -204,11 +234,15 @@ impl Client {
         req: &GetConfigRequest,
     ) -> Result<GetConfigResponse> {
         let url = format!("{}/ilink/bot/getconfig", self.base_url);
+        let mut req = req.clone();
+        if req.base_info.is_none() {
+            req.base_info = Some(BaseInfo::channel_default());
+        }
         let resp = self
             .client
             .post(&url)
             .headers(build_headers(Some(token)))
-            .json(req)
+            .json(&req)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -217,18 +251,22 @@ impl Client {
         Ok(serde_json::from_str(&resp.text().await?)?)
     }
 
-    /// `POST /ilink/bot/getuploadurl` — obtain CDN upload URL and AES key.
+    /// `POST /ilink/bot/getuploadurl` — obtain CDN upload URL.
     pub async fn get_upload_url(
         &self,
         token: &str,
         req: &GetUploadUrlRequest,
     ) -> Result<GetUploadUrlResponse> {
         let url = format!("{}/ilink/bot/getuploadurl", self.base_url);
+        let mut req = req.clone();
+        if req.base_info.is_none() {
+            req.base_info = Some(BaseInfo::channel_default());
+        }
         let resp = self
             .client
             .post(&url)
             .headers(build_headers(Some(token)))
-            .json(req)
+            .json(&req)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -608,7 +646,8 @@ mod tests {
                 json!({
                     "ilink_user_id": "user@wx",
                     "typing_ticket": "ticket-abc",
-                    "status": 1
+                    "status": 1,
+                    "base_info": { "channel_version": "2.2.0" }
                 })
                 .to_string(),
             ))
@@ -720,15 +759,19 @@ mod tests {
     // ── GetUploadUrl ─────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_get_upload_url_returns_cdn_url_and_key() {
+    async fn test_get_upload_url_returns_upload_url() {
         let mut server = mockito::Server::new_async().await;
         let client = Client::new(Some(server.url())).unwrap();
 
         let req = GetUploadUrlRequest {
-            aes_key: "test-aes-key-123".to_string(),
-            item_type: msg_type::IMAGE,
-            file_size: 65536,
-            file_md5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            filekey: "filekey-abc".to_string(),
+            media_type: 1,
+            to_user_id: "user@wx".to_string(),
+            rawsize: 65536,
+            rawfilemd5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            filesize: 65552,
+            no_need_thumb: true,
+            aeskey: "aabbccdd".to_string(),
             base_info: None,
         };
 
@@ -736,35 +779,25 @@ mod tests {
             .mock("POST", "/ilink/bot/getuploadurl")
             .match_header("authorization", "Bearer upload-token")
             .match_header("authorizationtype", "ilink_bot_token")
-            .match_body(mockito::Matcher::JsonString(
-                json!({
-                    "aes_key": "test-aes-key-123",
-                    "type": 2,
-                    "file_size": 65536,
-                    "file_md5": "d41d8cd98f00b204e9800998ecf8427e"
-                })
-                .to_string(),
-            ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 json!({
                     "ret": 0,
-                    "cdnurl": "https://cdn.weixin.qq.com/upload",
-                    "aes_key": "response-aes-key",
-                    "errmsg": "ok"
+                    "upload_full_url": "https://novac2c.cdn.weixin.qq.com/c2c?up=abc",
+                    "upload_param": "up=abc"
                 })
                 .to_string(),
             )
             .create();
 
         let resp = client.get_upload_url("upload-token", &req).await.unwrap();
-        assert_eq!(resp.ret, 0);
+        assert_eq!(resp.ret, Some(0));
         assert_eq!(
-            resp.cdnurl.as_deref(),
-            Some("https://cdn.weixin.qq.com/upload")
+            resp.upload_full_url.as_deref(),
+            Some("https://novac2c.cdn.weixin.qq.com/c2c?up=abc")
         );
-        assert_eq!(resp.aes_key.as_deref(), Some("response-aes-key"));
+        assert_eq!(resp.upload_param.as_deref(), Some("up=abc"));
         _mock.assert();
     }
 
@@ -774,10 +807,14 @@ mod tests {
         let client = Client::new(Some(server.url())).unwrap();
 
         let req = GetUploadUrlRequest {
-            aes_key: "key".to_string(),
-            item_type: 2,
-            file_size: 1024,
-            file_md5: "abc".to_string(),
+            filekey: "k".to_string(),
+            media_type: 1,
+            to_user_id: "u".to_string(),
+            rawsize: 1024,
+            rawfilemd5: "abc".to_string(),
+            filesize: 1040,
+            no_need_thumb: true,
+            aeskey: "key".to_string(),
             base_info: None,
         };
 

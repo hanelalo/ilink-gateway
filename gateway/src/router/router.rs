@@ -5,10 +5,11 @@
 //! handles built-in commands (/use, /list, /status, /cmd),
 //! and dispatches agent replies back to iLink.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::agents::queue::MessageQueue;
 use crate::agents::registry::AgentRegistry;
+use crate::config::{DmPolicy, GroupPolicy};
 use crate::error::{GatewayError, Result};
 use crate::ilink::types::{
     msg_type, AgentMessage, MediaItem, QueuedMessage, RouterCommand, WeixinMessage,
@@ -34,6 +35,14 @@ pub struct Router {
     /// Per-agent per-user ACP session IDs.
     /// Key: agent_name → (from_user → acp_session_id)
     agent_sessions: HashMap<String, HashMap<String, String>>,
+    /// DM admission policy.
+    dm_policy: DmPolicy,
+    /// Group admission policy.
+    group_policy: GroupPolicy,
+    /// Allowlisted WeChat user IDs (for DM allowlist/pairing).
+    allowed_users: HashSet<String>,
+    /// Allowlisted WeChat group IDs.
+    allowed_groups: HashSet<String>,
 }
 
 impl Router {
@@ -45,6 +54,43 @@ impl Router {
             active_agent: None,
             cmd_max_output_chars: 2000,
             agent_sessions: HashMap::new(),
+            dm_policy: DmPolicy::Open,
+            group_policy: GroupPolicy::Disabled,
+            allowed_users: HashSet::new(),
+            allowed_groups: HashSet::new(),
+        }
+    }
+
+    /// Configure the admission policies.
+    pub fn set_policies(
+        &mut self,
+        dm_policy: DmPolicy,
+        group_policy: GroupPolicy,
+        allowed_users: HashSet<String>,
+        allowed_groups: HashSet<String>,
+    ) {
+        self.dm_policy = dm_policy;
+        self.group_policy = group_policy;
+        self.allowed_users = allowed_users;
+        self.allowed_groups = allowed_groups;
+    }
+
+    /// Returns `true` if a DM from `from_user` is allowed under the current policy.
+    fn is_dm_allowed(&self, from_user: &str) -> bool {
+        match self.dm_policy {
+            DmPolicy::Disabled => false,
+            // Pairing approval flow is not implemented; behave as allowlist.
+            DmPolicy::Pairing | DmPolicy::Allowlist => self.allowed_users.contains(from_user),
+            DmPolicy::Open => true,
+        }
+    }
+
+    /// Returns `true` if a group message from `group_id` is allowed.
+    fn is_group_allowed(&self, group_id: &str) -> bool {
+        match self.group_policy {
+            GroupPolicy::Disabled => false,
+            GroupPolicy::All => true,
+            GroupPolicy::Allowlist => self.allowed_groups.contains(group_id),
         }
     }
 
@@ -139,6 +185,19 @@ impl Router {
     /// held across `.await` points.  When the `/cmd` branch needs the async
     /// `execute_command` it bridges via `tokio::task::block_in_place`.
     pub fn handle_incoming(&mut self, msg: &WeixinMessage) -> Result<Option<String>> {
+        // Admission policy check — drop disallowed senders silently.
+        let from_user = msg.from_user_id.as_deref().unwrap_or("");
+        if msg.group_id.is_some() {
+            let gid = msg.group_id.as_deref().unwrap_or("");
+            if !self.is_group_allowed(gid) {
+                tracing::debug!("group message from {gid} dropped by group policy");
+                return Ok(None);
+            }
+        } else if !self.is_dm_allowed(from_user) {
+            tracing::debug!("DM from {from_user} dropped by dm policy");
+            return Ok(None);
+        }
+
         let text = msg.text().ok_or_else(|| {
             GatewayError::Command("Message has no text content".to_string())
         })?;
@@ -380,6 +439,141 @@ mod tests {
         Router::new(AgentRegistry::new(), MessageQueue::new())
     }
 
+    fn make_group_msg(text: &str, group_id: &str) -> WeixinMessage {
+        let mut msg = make_text_msg(text);
+        msg.group_id = Some(group_id.to_string());
+        msg
+    }
+
+    // ─── Admission policy tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_dm_policy_disabled_drops_all_dms() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
+        router.set_policies(
+            DmPolicy::Disabled,
+            GroupPolicy::Disabled,
+            HashSet::new(),
+            HashSet::new(),
+        );
+
+        let msg = make_text_msg("hello");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_none(), "DM should be dropped by disabled policy");
+        assert!(!router.queue().has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_dm_policy_allowlist_drops_non_allowlisted() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
+        let mut allowed = HashSet::new();
+        allowed.insert("vip@wx".to_string());
+        router.set_policies(
+            DmPolicy::Allowlist,
+            GroupPolicy::Disabled,
+            allowed,
+            HashSet::new(),
+        );
+
+        // Non-allowlisted user → dropped
+        let msg = make_text_msg("hello");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_none());
+        assert!(!router.queue().has_pending("hermes"));
+
+        // Allowlisted user → allowed
+        let mut msg2 = make_text_msg("hello vip");
+        msg2.from_user_id = Some("vip@wx".to_string());
+        let result2 = router.handle_incoming(&msg2).unwrap();
+        assert!(result2.is_none());
+        assert!(router.queue().has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_dm_policy_open_allows_all() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
+        router.set_policies(
+            DmPolicy::Open,
+            GroupPolicy::Disabled,
+            HashSet::new(),
+            HashSet::new(),
+        );
+
+        let msg = make_text_msg("hello");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_none());
+        assert!(router.queue().has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_group_policy_disabled_drops_group_messages() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
+        router.set_policies(
+            DmPolicy::Open,
+            GroupPolicy::Disabled,
+            HashSet::new(),
+            HashSet::new(),
+        );
+
+        let msg = make_group_msg("hello group", "group-123");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_none());
+        assert!(!router.queue().has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_group_policy_all_allows_all_groups() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
+        router.set_policies(
+            DmPolicy::Open,
+            GroupPolicy::All,
+            HashSet::new(),
+            HashSet::new(),
+        );
+
+        let msg = make_group_msg("hello group", "group-123");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_none());
+        assert!(router.queue().has_pending("hermes"));
+    }
+
+    #[test]
+    fn test_group_policy_allowlist_only_allowlisted() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_active_agent("hermes").unwrap();
+        let mut allowed_groups = HashSet::new();
+        allowed_groups.insert("allowed-group".to_string());
+        router.set_policies(
+            DmPolicy::Open,
+            GroupPolicy::Allowlist,
+            HashSet::new(),
+            allowed_groups,
+        );
+
+        // Non-allowlisted group → dropped
+        let msg = make_group_msg("hello", "random-group");
+        let result = router.handle_incoming(&msg).unwrap();
+        assert!(result.is_none());
+        assert!(!router.queue().has_pending("hermes"));
+
+        // Allowlisted group → allowed
+        let msg2 = make_group_msg("hello", "allowed-group");
+        let result2 = router.handle_incoming(&msg2).unwrap();
+        assert!(result2.is_none());
+        assert!(router.queue().has_pending("hermes"));
+    }
+
     fn register_agent(router: &mut Router, name: &str) {
         let caps = vec!["text".to_string()];
         router
@@ -541,6 +735,7 @@ mod tests {
                     md5: Some("abc123".to_string()),
                     aes_key: Some("aes-key-123".to_string()),
                     encrypt_query_param: Some("enc=xyz".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }]),
@@ -585,6 +780,7 @@ mod tests {
                     aes_key: Some("vid-aes".to_string()),
                     encrypt_query_param: Some("enc=vid".to_string()),
                     md5: Some("md5-video".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }]),
@@ -604,6 +800,7 @@ mod tests {
                 file_item: Some(FileItem {
                     file_name: Some("document.pdf".to_string()),
                     file_size: Some(1024),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }]),

@@ -80,6 +80,12 @@ async fn main() -> Result<()> {
     let queue = MessageQueue::new();
     let mut router = Router::new(registry, queue);
     router.set_cmd_max_output_chars(config.cmd_max_output_chars);
+    router.set_policies(
+        config.dm_policy,
+        config.group_policy,
+        config.allowed_users.clone(),
+        config.allowed_groups.clone(),
+    );
 
     // 4b. Restore persisted state (active_agent, session IDs)
     router.load_state(&store);
@@ -93,6 +99,12 @@ async fn main() -> Result<()> {
     let message_contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let typing_ticket_cache = TypingTicketCache::new();
+    let send_breaker: SharedBreaker = Arc::new(Mutex::new(CircuitBreaker::new(
+        1,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    )));
+    let dedup = Arc::new(Mutex::new(DedupCache::new(Duration::from_secs(300))));
     let ws_registry = WsRegistry::new();
     let http_client = reqwest::Client::new();
     let _state = AppState {
@@ -115,8 +127,7 @@ async fn main() -> Result<()> {
             }
             None => {
                 tracing::info!("no saved credentials found; starting QR code login");
-                let client = IlinkClient::new(Some(config.ilink_base_url.clone()))?;
-                qr_login_and_save(&client, &store_lock).await?
+                qr_login_and_save(&config.ilink_base_url, &store_lock).await?
             }
         }
     };
@@ -142,10 +153,11 @@ async fn main() -> Result<()> {
         let reply_token = token.clone();
         let reply_ctx = message_contexts.clone();
         let reply_tickets = typing_ticket_cache.clone();
+        let reply_breaker = send_breaker.clone();
         let reply_router = router_arc.clone();
         let mut rx = reply_rx;
         tokio::spawn(async move {
-            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, reply_tickets, &mut rx).await;
+            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, reply_tickets, reply_breaker, &mut rx).await;
         })
     };
 
@@ -200,6 +212,13 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Dedup: skip messages we've already processed (message_id + content MD5, 5 min TTL)
+                let key = dedup_key(&msg);
+                if !dedup.lock().unwrap().check_and_record(&key) {
+                    tracing::debug!("skipping duplicate message {key}");
+                    continue;
+                }
+
                 let (reply_text, active_agent) = {
                     let mut router_guard = router_arc.lock().unwrap();
                     let active = router_guard.active_agent().map(|s| s.to_string());
@@ -229,7 +248,10 @@ async fn main() -> Result<()> {
                                 base_info: None,
                             };
 
-                            if let Err(e) = client.send_message(&current_token, &send_req).await {
+                            if let Err(e) =
+                                resilient_send(&client, &current_token, send_req, &send_breaker)
+                                    .await
+                            {
                                 tracing::warn!("send_message error: {e}");
                             }
                         },
@@ -483,6 +505,164 @@ async fn with_typing<T>(
     result
 }
 
+// ─── Circuit breaker + resilient send ───────────────────────────────────
+
+/// Sliding-window circuit breaker for the iLink send path.
+///
+/// Per docs/wechat.md §8: 30s window, default threshold 1 failure → open
+/// for 30s, reset on success.
+#[derive(Clone)]
+struct CircuitBreaker {
+    failures: Vec<Instant>,
+    opened_at: Option<Instant>,
+    window: Duration,
+    threshold: usize,
+    cooldown: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: usize, window: Duration, cooldown: Duration) -> Self {
+        Self {
+            failures: Vec::new(),
+            opened_at: None,
+            window,
+            threshold,
+            cooldown,
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        match self.opened_at {
+            Some(opened) => opened.elapsed() < self.cooldown,
+            None => false,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.failures.clear();
+        self.opened_at = None;
+    }
+
+    fn record_failure(&mut self) {
+        let now = Instant::now();
+        self.failures.retain(|t| now.duration_since(*t) < self.window);
+        self.failures.push(now);
+        if self.failures.len() >= self.threshold {
+            if self.opened_at.is_none() {
+                tracing::warn!(
+                    "circuit breaker opened — pausing sends for {:?}",
+                    self.cooldown
+                );
+            }
+            self.opened_at = Some(now);
+        }
+    }
+}
+
+type SharedBreaker = Arc<Mutex<CircuitBreaker>>;
+
+/// Message dedup cache: tracks (message_id, content-md5) keys with a TTL
+/// to avoid re-processing messages that iLink re-delivers after reconnects.
+struct DedupCache {
+    seen: HashMap<String, Instant>,
+    ttl: Duration,
+}
+
+impl DedupCache {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            seen: HashMap::new(),
+            ttl,
+        }
+    }
+
+    /// Returns `true` if this key is new (and records it), `false` if it
+    /// was already seen within the TTL window.
+    fn check_and_record(&mut self, key: &str) -> bool {
+        let now = Instant::now();
+        self.seen.retain(|_, t| now.duration_since(*t) < self.ttl);
+        if self.seen.contains_key(key) {
+            return false;
+        }
+        self.seen.insert(key.to_string(), now);
+        true
+    }
+}
+
+/// Build the dedup key: `"{message_id}:{md5(content)}"`.
+fn dedup_key(msg: &WeixinMessage) -> String {
+    use md5::{Digest, Md5};
+    let id = msg.message_id.unwrap_or(0);
+    let content = msg.text().unwrap_or("");
+    let content_md5 = format!("{:x}", Md5::digest(content.as_bytes()));
+    format!("{id}:{content_md5}")
+}
+
+/// Send a message with resilience: errcode=-2 exponential backoff (up to 4
+/// retries), errcode=-14 context_token-stripping fallback, and circuit
+/// breaker integration.
+///
+/// Returns `Ok(())` on success (errcode 0), or the first unrecoverable
+/// error.  Records success/failure to the shared breaker.
+async fn resilient_send(
+    client: &IlinkClient,
+    token: &str,
+    mut req: SendMessageRequest,
+    breaker: &SharedBreaker,
+) -> std::result::Result<(), GatewayError> {
+    {
+        let b = breaker.lock().unwrap();
+        if b.is_open() {
+            tracing::warn!("circuit breaker open — skipping send");
+            return Err(GatewayError::Ilink(
+                "circuit breaker open — iLink send paused".to_string(),
+            ));
+        }
+    }
+
+    for attempt in 0..4u32 {
+        match client.send_message(token, &req).await {
+            Ok(resp) => {
+                let errcode = resp.errcode.unwrap_or(0);
+                if errcode == 0 {
+                    breaker.lock().unwrap().record_success();
+                    return Ok(());
+                }
+                if errcode == -2 {
+                    tracing::warn!(
+                        "sendmessage rate-limited (errcode=-2), attempt {}/4",
+                        attempt + 1
+                    );
+                    let delay = Duration::from_secs(1u64 << attempt);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                if errcode == -14 && req.msg.context_token.is_some() {
+                    tracing::warn!(
+                        "sendmessage errcode=-14 — retrying without context_token"
+                    );
+                    req.msg.context_token = None;
+                    continue;
+                }
+                breaker.lock().unwrap().record_failure();
+                let errmsg = resp.errmsg.unwrap_or_default();
+                return Err(GatewayError::Ilink(format!(
+                    "sendmessage errcode={errcode}: {errmsg}"
+                )));
+            }
+            Err(e) => {
+                breaker.lock().unwrap().record_failure();
+                return Err(e);
+            }
+        }
+    }
+
+    breaker.lock().unwrap().record_failure();
+    Err(GatewayError::Ilink(
+        "sendmessage exhausted errcode=-2 retries".to_string(),
+    ))
+}
+
 /// Background task that processes agent replies from the channel.
 ///
 /// Receives `AgentReply` from the HTTP API and sends them through iLink.
@@ -494,6 +674,7 @@ async fn handle_agent_replies(
     _router: Arc<Mutex<Router>>,
     contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>>,
     ticket_cache: TypingTicketCache,
+    breaker: SharedBreaker,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentReply>,
 ) {
     while let Some(reply) = rx.recv().await {
@@ -520,7 +701,7 @@ async fn handle_agent_replies(
                     msg: reply_msg,
                     base_info: None,
                 };
-                if let Err(e) = client.send_message(&token, &req).await {
+                if let Err(e) = resilient_send(&client, &token, req, &breaker).await {
                     tracing::error!("failed to send text reply: {e}");
                 }
             })
@@ -532,21 +713,22 @@ async fn handle_agent_replies(
             with_typing(&ticket_cache, &client, &token, &to_user, async {
                 // Process the first media file
                 let first_path = &reply.media_paths[0];
-                match process_media_upload(&client, &token, first_path).await {
-                    Ok((item_type, encrypt_query_param, aes_key)) => {
+                match process_media_upload(&client, &token, &to_user, first_path).await {
+                    Ok(upload) => {
                         let reply_msg = WeixinMessage::build_media_reply(
                             context_token.clone(),
                             to_user.clone(),
                             reply.text.clone(),
-                            item_type,
-                            encrypt_query_param,
-                            aes_key,
+                            upload.item_type,
+                            upload.encrypt_query_param,
+                            upload.aes_key,
+                            upload.mid_size,
                         );
                         let req = SendMessageRequest {
                             msg: reply_msg,
                             base_info: None,
                         };
-                        if let Err(e) = client.send_message(&token, &req).await {
+                        if let Err(e) = resilient_send(&client, &token, req, &breaker).await {
                             tracing::error!("failed to send media reply: {e}");
                         }
                     }
@@ -562,7 +744,7 @@ async fn handle_agent_replies(
                             msg: reply_msg,
                             base_info: None,
                         };
-                        if let Err(e2) = client.send_message(&token, &req).await {
+                        if let Err(e2) = resilient_send(&client, &token, req, &breaker).await {
                             tracing::error!("failed to send fallback message: {e2}");
                         }
                     }
@@ -582,7 +764,7 @@ async fn handle_agent_replies(
                     msg: reply_msg,
                     base_info: None,
                 };
-                if let Err(e) = client.send_message(&token, &req).await {
+                if let Err(e) = resilient_send(&client, &token, req, &breaker).await {
                     tracing::error!("failed to send additional file note: {e}");
                 }
             }
@@ -602,13 +784,20 @@ async fn handle_agent_replies(
 /// 3. Poll `poll_qr_status()` until status is `"confirmed"`
 /// 4. Save the credentials to the store
 /// 5. Return `(token, base_url)`
+///
+/// Polling runs at 1s intervals with a 480s (8 min) overall deadline.
+/// Handles `scaned` (waiting for mobile confirmation), `scaned_but_redirect`
+/// (switch to the new base_url returned by iLink), and `expired` (auto-retry
+/// up to 3 times).
 async fn qr_login_and_save(
-    client: &IlinkClient,
+    initial_base_url: &str,
     store: &SqliteStore,
 ) -> Result<(String, String)> {
+    let mut client = IlinkClient::new(Some(initial_base_url.to_string()))?;
+
     // Step 1: get QR code
     let qr_resp = client.get_qr_code().await?;
-    let qrcode = qr_resp
+    let mut qrcode = qr_resp
         .qrcode
         .ok_or_else(|| GatewayError::Ilink("QR code key is empty".to_string()))?;
 
@@ -622,9 +811,17 @@ async fn qr_login_and_save(
         .unwrap_or(&qrcode);
     render_qr(qr_scan_data);
 
-    // Step 3: poll until confirmed
+    // Step 3: poll until confirmed (480s / 8 min deadline, 1s interval)
+    let deadline = Instant::now() + Duration::from_secs(480);
+    let mut expired_retries = 0u32;
     let (token, base_url, account_id, user_id) = loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        if Instant::now() >= deadline {
+            return Err(GatewayError::Ilink(
+                "QR login timed out after 480 seconds".to_string(),
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let status_resp = client.poll_qr_status(&qrcode).await?;
 
@@ -648,10 +845,38 @@ async fn qr_login_and_save(
                 tracing::info!("waiting for QR scan...");
                 continue;
             }
+            Some("scaned") => {
+                tracing::info!("QR scanned — please tap confirm in WeChat");
+                continue;
+            }
+            Some("scaned_but_redirect") => {
+                // Switch to the new base_url returned by iLink.
+                if let Some(ref new_base) = status_resp.baseurl {
+                    tracing::info!("QR redirect — switching to {new_base}");
+                    client = IlinkClient::new(Some(new_base.clone()))?;
+                }
+                continue;
+            }
             Some("expired") => {
-                return Err(GatewayError::Ilink(
-                    "QR code expired; please restart".to_string(),
-                ));
+                expired_retries += 1;
+                if expired_retries > 3 {
+                    return Err(GatewayError::Ilink(
+                        "QR code expired 3 times; please restart".to_string(),
+                    ));
+                }
+                tracing::warn!("QR expired, refreshing (attempt {expired_retries}/3)");
+                // Re-fetch a fresh QR code and render it.
+                let qr_resp = client.get_qr_code().await?;
+                qrcode = qr_resp.qrcode.ok_or_else(|| {
+                    GatewayError::Ilink("refreshed QR code key is empty".to_string())
+                })?;
+                let qr_scan_data = qr_resp
+                    .qrcode_img_content
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&qrcode);
+                render_qr(qr_scan_data);
+                continue;
             }
             Some(other) => {
                 tracing::info!("QR status: {other}");
@@ -939,7 +1164,6 @@ mod tests {
     #[tokio::test]
     async fn test_qr_login_flow_with_mockito() {
         let mut server = mockito::Server::new_async().await;
-        let client = IlinkClient::new(Some(server.url())).unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         let store = SqliteStore::new(file.path().to_str().unwrap()).unwrap();
 
@@ -992,7 +1216,7 @@ mod tests {
             .with_body(serde_json::json!({"ret": 0}).to_string())
             .create();
 
-        let (token, base_url) = qr_login_and_save(&client, &store)
+        let (token, base_url) = qr_login_and_save(&server.url(), &store)
             .await
             .expect("QR login should succeed");
 
@@ -1261,6 +1485,11 @@ mod tests {
             MessageQueue::new(),
         )));
         let tickets = TypingTicketCache::new();
+        let breaker: SharedBreaker = Arc::new(Mutex::new(CircuitBreaker::new(
+            1,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        )));
         tokio::spawn(async move {
             handle_agent_replies(
                 client,
@@ -1268,6 +1497,7 @@ mod tests {
                 router,
                 ctx_clone,
                 tickets,
+                breaker,
                 &mut rx,
             )
             .await;
@@ -1301,23 +1531,21 @@ mod tests {
         std::fs::write(&media_path, b"fake image data").unwrap();
 
         // Mock getuploadurl
-        let cdn_url = format!("{}/cdn/upload?encrypted_param_123", server.url());
         let upload_mock = server
             .mock("POST", "/ilink/bot/getuploadurl")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(serde_json::json!({
                 "ret": 0,
-                "cdnurl": cdn_url,
-                "aes_key": "0123456789abcdef0123456789abcdef"
+                "upload_full_url": format!("{}/cdn/upload", server.url()),
             }).to_string())
             .create();
 
-        // Mock CDN upload (PUT)
+        // Mock CDN upload (POST) — returns x-encrypted-param header
         let cdn_mock = server
-            .mock("PUT", "/cdn/upload")
-            .match_query(mockito::Matcher::Any)
+            .mock("POST", "/cdn/upload")
             .with_status(200)
+            .with_header("x-encrypted-param", "encrypted_param_123")
             .create();
 
         // Mock sendmessage
@@ -1347,9 +1575,14 @@ mod tests {
             MessageQueue::new(),
         )));
         let tickets = TypingTicketCache::new();
+        let breaker: SharedBreaker = Arc::new(Mutex::new(CircuitBreaker::new(
+            1,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        )));
 
         tokio::spawn(async move {
-            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, tickets, &mut rx)
+            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, tickets, breaker, &mut rx)
                 .await;
         });
 
@@ -1444,7 +1677,8 @@ mod tests {
                 serde_json::json!({
                     "ilink_user_id": "user@wx",
                     "typing_ticket": "ticket-abc",
-                    "status": 1
+                    "status": 1,
+                    "base_info": { "channel_version": "2.2.0" }
                 }).to_string(),
             ))
             .with_status(200)
@@ -1471,7 +1705,8 @@ mod tests {
                 serde_json::json!({
                     "ilink_user_id": "user@wx",
                     "typing_ticket": "ticket-abc",
-                    "status": 2
+                    "status": 2,
+                    "base_info": { "channel_version": "2.2.0" }
                 }).to_string(),
             ))
             .with_status(200)
@@ -1520,7 +1755,8 @@ mod tests {
                 serde_json::json!({
                     "ilink_user_id": "user@wx",
                     "typing_ticket": "ticket-abc",
-                    "status": 1
+                    "status": 1,
+                    "base_info": { "channel_version": "2.2.0" }
                 }).to_string(),
             ))
             .with_status(200)
@@ -1536,7 +1772,8 @@ mod tests {
                 serde_json::json!({
                     "ilink_user_id": "user@wx",
                     "typing_ticket": "ticket-abc",
-                    "status": 2
+                    "status": 2,
+                    "base_info": { "channel_version": "2.2.0" }
                 }).to_string(),
             ))
             .with_status(200)

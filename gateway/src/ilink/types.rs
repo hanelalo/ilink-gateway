@@ -22,6 +22,19 @@ pub struct BaseInfo {
     pub bot_agent: Option<String>,
 }
 
+impl BaseInfo {
+    /// The channel version required by every iLink request.
+    pub const CHANNEL_VERSION: &'static str = "2.2.0";
+
+    /// Build a `BaseInfo` carrying the required `channel_version`.
+    pub fn channel_default() -> Self {
+        Self {
+            channel_version: Some(Self::CHANNEL_VERSION.to_string()),
+            bot_agent: None,
+        }
+    }
+}
+
 // ── Login / QR ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -49,30 +62,74 @@ pub struct QrcodeStatusResponse {
 
 // ── CDN Upload ─────────────────────────────────────────────────────────
 
-/// CDN upload response (POST /ilink/bot/getuploadurl)
-#[derive(Debug, Deserialize)]
-pub struct GetUploadUrlResponse {
-    #[allow(dead_code)]
-    pub ret: i32,
-    pub cdnurl: Option<String>,
-    pub aes_key: Option<String>,
-    #[allow(dead_code)]
-    pub errmsg: Option<String>,
-}
-
-/// Upload request
-#[derive(Debug, Serialize)]
+/// Upload request body for `POST /ilink/bot/getuploadurl`.
+///
+/// Field names match the iLink API exactly (note the inconsistent
+/// snake_case: `aeskey`, `filesize`, `rawfilemd5` have no underscores,
+/// while `to_user_id` and `no_need_thumb` do).
+#[derive(Debug, Clone, Serialize)]
 pub struct GetUploadUrlRequest {
-    pub aes_key: String,
-    #[serde(rename = "type")]
-    pub item_type: i32,
-    pub file_size: i64,
-    pub file_md5: String,
+    pub filekey: String,
+    pub media_type: i32,
+    pub to_user_id: String,
+    pub rawsize: i64,
+    pub rawfilemd5: String,
+    pub filesize: i64,
+    pub no_need_thumb: bool,
+    pub aeskey: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_info: Option<BaseInfo>,
 }
 
+/// `media_type` values used inside [`GetUploadUrlRequest`].
+///
+/// Note: this numbering differs from [`msg_type`] — the upload endpoint
+/// uses its own ordering.
+pub mod upload_media_type {
+    pub const IMAGE: i32 = 1;
+    pub const VIDEO: i32 = 2;
+    pub const FILE: i32 = 3;
+    pub const VOICE: i32 = 4;
+}
+
+/// CDN upload response (POST /ilink/bot/getuploadurl).
+///
+/// Prefer `upload_full_url`; fall back to `upload_param` (a pre-formed
+/// query string to append to the CDN base URL).
+#[derive(Debug, Deserialize)]
+pub struct GetUploadUrlResponse {
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub ret: Option<i32>,
+    #[serde(default)]
+    pub upload_full_url: Option<String>,
+    #[serde(default)]
+    pub upload_param: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub errmsg: Option<String>,
+}
+
 // ── Message Items ────────────────────────────────────────────────────────
+
+/// `encrypt_type` for outbound media items (AES-128-ECB is the only
+/// documented value).
+pub const ENCRYPT_TYPE_AES_128_ECB: i32 = 1;
+
+/// Nested `media` object inside outbound image/voice/video/file items.
+///
+/// Carries the CDN reference produced by the upload flow.  Inbound media
+/// items use flat `aes_key` / `encrypt_query_param` fields instead, so
+/// `MediaRef` is only populated on the outbound (serialize) side.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MediaRef {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypt_query_param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypt_type: Option<i32>,
+}
 
 pub mod msg_type {
     pub const TEXT: i32 = 1;
@@ -101,6 +158,12 @@ pub struct TextItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VoiceItem {
+    // Outbound: nested media + ciphertext size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mid_size: Option<i64>,
+    // Inbound: flat CDN reference fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +176,12 @@ pub struct VoiceItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ImageItem {
+    // Outbound: nested media + ciphertext size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mid_size: Option<i64>,
+    // Inbound: flat CDN reference fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdn_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +194,12 @@ pub struct ImageItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileItem {
+    // Outbound: nested media + ciphertext size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mid_size: Option<i64>,
+    // Common: file metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +208,12 @@ pub struct FileItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VideoItem {
+    // Outbound: nested media + ciphertext size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mid_size: Option<i64>,
+    // Inbound: flat CDN reference fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdn_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,7 +260,7 @@ pub struct WeixinMessage {
     pub create_time_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "room_id", skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     /// 1 = user message, 2 = bot message
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,10 +311,12 @@ impl WeixinMessage {
         }
     }
 
-    /// Build a media reply with an encrypted CDN URL.
+    /// Build a media reply with an encrypted CDN reference.
     ///
     /// Used when an agent sends back a media message (image, voice, video, or file).
     /// The `text` goes into `text_item` and, for file type, also into `file_item.file_name`.
+    /// `mid_size` is the ciphertext (encrypted) file size — not the raw size.
+    /// `aes_key` must already be in the API format: `base64(hex_string_of_original_key)`.
     pub fn build_media_reply(
         context_token: String,
         to_user: String,
@@ -241,7 +324,14 @@ impl WeixinMessage {
         item_type: i32,
         encrypt_query_param: String,
         aes_key: String,
+        mid_size: i64,
     ) -> Self {
+        let media = MediaRef {
+            encrypt_query_param: Some(encrypt_query_param),
+            aes_key: Some(aes_key),
+            encrypt_type: Some(ENCRYPT_TYPE_AES_128_ECB),
+        };
+
         let mut item = MessageItem {
             item_type: Some(item_type),
             text_item: Some(TextItem {
@@ -253,27 +343,29 @@ impl WeixinMessage {
         match item_type {
             msg_type::IMAGE => {
                 item.image_item = Some(ImageItem {
-                    encrypt_query_param: Some(encrypt_query_param),
-                    aes_key: Some(aes_key),
+                    media: Some(media),
+                    mid_size: Some(mid_size),
                     ..Default::default()
                 });
             }
             msg_type::VOICE => {
                 item.voice_item = Some(VoiceItem {
-                    encrypt_query_param: Some(encrypt_query_param),
-                    aes_key: Some(aes_key),
+                    media: Some(media),
+                    mid_size: Some(mid_size),
                     ..Default::default()
                 });
             }
             msg_type::VIDEO => {
                 item.video_item = Some(VideoItem {
-                    encrypt_query_param: Some(encrypt_query_param),
-                    aes_key: Some(aes_key),
+                    media: Some(media),
+                    mid_size: Some(mid_size),
                     ..Default::default()
                 });
             }
             msg_type::FILE => {
                 item.file_item = Some(FileItem {
+                    media: Some(media),
+                    mid_size: Some(mid_size),
                     file_name: Some(text),
                     ..Default::default()
                 });
@@ -300,7 +392,7 @@ fn new_client_id() -> String {
 
 // ── GetUpdates ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GetUpdatesRequest {
     pub get_updates_buf: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,14 +431,20 @@ pub struct SendMessageResponse {
     #[allow(dead_code)]
     #[serde(default)]
     pub ret: Option<i32>,
+    #[serde(default)]
+    pub errcode: Option<i32>,
     #[allow(dead_code)]
     #[serde(default)]
     pub errmsg: Option<String>,
+    /// New context_token returned by the server — update the stored one.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub context_token: Option<String>,
 }
 
 // ── SendTyping ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SendTypingRequest {
     pub ilink_user_id: String,
     pub typing_ticket: String,
@@ -357,7 +455,7 @@ pub struct SendTypingRequest {
 
 // ── GetConfig ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GetConfigRequest {
     pub ilink_user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -638,27 +736,37 @@ mod tests {
     #[test]
     fn test_get_upload_url_request_serialization() {
         let req = GetUploadUrlRequest {
-            aes_key: "test-aes-key".to_string(),
-            item_type: 2,
-            file_size: 1024,
-            file_md5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            filekey: "abc123".to_string(),
+            media_type: 1,
+            to_user_id: "user@wx".to_string(),
+            rawsize: 1024,
+            rawfilemd5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            filesize: 1040,
+            no_need_thumb: true,
+            aeskey: "aabbccdd".to_string(),
             base_info: None,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("test-aes-key"));
-        assert!(json.contains(r#""type":2"#));
-        assert!(json.contains("file_size"));
-        assert!(json.contains("1024"));
-        assert!(json.contains("file_md5"));
+        assert!(json.contains(r#""filekey":"abc123""#));
+        assert!(json.contains(r#""media_type":1"#));
+        assert!(json.contains(r#""to_user_id":"user@wx""#));
+        assert!(json.contains(r#""rawsize":1024"#));
+        assert!(json.contains("rawfilemd5"));
+        assert!(json.contains(r#""filesize":1040"#));
+        assert!(json.contains(r#""no_need_thumb":true"#));
+        assert!(json.contains(r#""aeskey":"aabbccdd""#));
     }
 
     #[test]
     fn test_get_upload_url_response_deserialization() {
-        let json = r#"{"ret":0,"cdnurl":"https://cdn.weixin.qq.com/upload","aes_key":"key123","errmsg":"ok"}"#;
+        let json = r#"{"ret":0,"upload_full_url":"https://novac2c.cdn.weixin.qq.com/c2c?up=abc","upload_param":"up=abc"}"#;
         let resp: GetUploadUrlResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.ret, 0);
-        assert_eq!(resp.cdnurl.as_deref(), Some("https://cdn.weixin.qq.com/upload"));
-        assert_eq!(resp.aes_key.as_deref(), Some("key123"));
+        assert_eq!(resp.ret, Some(0));
+        assert_eq!(
+            resp.upload_full_url.as_deref(),
+            Some("https://novac2c.cdn.weixin.qq.com/c2c?up=abc")
+        );
+        assert_eq!(resp.upload_param.as_deref(), Some("up=abc"));
     }
 
     #[test]
@@ -666,9 +774,9 @@ mod tests {
         // Some fields may be absent on error responses
         let json = r#"{"ret":-1,"errmsg":"invalid param"}"#;
         let resp: GetUploadUrlResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.ret, -1);
-        assert!(resp.cdnurl.is_none());
-        assert!(resp.aes_key.is_none());
+        assert_eq!(resp.ret, Some(-1));
+        assert!(resp.upload_full_url.is_none());
+        assert!(resp.upload_param.is_none());
     }
 
     #[test]
@@ -678,6 +786,7 @@ mod tests {
             aes_key: Some("aes-key-123".to_string()),
             encrypt_query_param: Some("enc=abc".to_string()),
             md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_string()),
+            ..Default::default()
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("cdn_url"));
@@ -799,6 +908,7 @@ mod tests {
             msg_type::IMAGE,
             "enc=abc123".to_string(),
             "aes-key-456".to_string(),
+            1024,
         );
         assert_eq!(msg.message_type, Some(chat_type::BOT));
         assert_eq!(msg.message_state, Some(message_state::FINISH));
@@ -809,11 +919,14 @@ mod tests {
         assert_eq!(items[0].item_type, Some(msg_type::IMAGE));
 
         let img = items[0].image_item.as_ref().unwrap();
+        let media = img.media.as_ref().unwrap();
         assert_eq!(
-            img.encrypt_query_param.as_deref(),
+            media.encrypt_query_param.as_deref(),
             Some("enc=abc123")
         );
-        assert_eq!(img.aes_key.as_deref(), Some("aes-key-456"));
+        assert_eq!(media.aes_key.as_deref(), Some("aes-key-456"));
+        assert_eq!(media.encrypt_type, Some(ENCRYPT_TYPE_AES_128_ECB));
+        assert_eq!(img.mid_size, Some(1024));
     }
 
     #[test]
@@ -825,17 +938,20 @@ mod tests {
             msg_type::VIDEO,
             "enc=video123".to_string(),
             "vid-aes-key".to_string(),
+            2048,
         );
         let items = msg.item_list.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].item_type, Some(msg_type::VIDEO));
 
         let video = items[0].video_item.as_ref().unwrap();
+        let media = video.media.as_ref().unwrap();
         assert_eq!(
-            video.encrypt_query_param.as_deref(),
+            media.encrypt_query_param.as_deref(),
             Some("enc=video123")
         );
-        assert_eq!(video.aes_key.as_deref(), Some("vid-aes-key"));
+        assert_eq!(media.aes_key.as_deref(), Some("vid-aes-key"));
+        assert_eq!(video.mid_size, Some(2048));
     }
 
     #[test]
@@ -845,8 +961,9 @@ mod tests {
             "user@wx".to_string(),
             "report.pdf".to_string(),
             msg_type::FILE,
-            String::new(),
-            String::new(),
+            "enc=file".to_string(),
+            "file-aes".to_string(),
+            512,
         );
         let items = msg.item_list.unwrap();
         assert_eq!(items.len(), 1);
@@ -854,6 +971,8 @@ mod tests {
 
         let file = items[0].file_item.as_ref().unwrap();
         assert_eq!(file.file_name.as_deref(), Some("report.pdf"));
+        assert!(file.media.is_some());
+        assert_eq!(file.mid_size, Some(512));
     }
 
     #[test]
@@ -865,12 +984,14 @@ mod tests {
             msg_type::VOICE,
             "enc=voice".to_string(),
             "voice-aes".to_string(),
+            256,
         );
         let items = msg.item_list.unwrap();
         assert_eq!(items[0].item_type, Some(msg_type::VOICE));
 
         let voice = items[0].voice_item.as_ref().unwrap();
-        assert_eq!(voice.encrypt_query_param.as_deref(), Some("enc=voice"));
-        assert_eq!(voice.aes_key.as_deref(), Some("voice-aes"));
+        let media = voice.media.as_ref().unwrap();
+        assert_eq!(media.encrypt_query_param.as_deref(), Some("enc=voice"));
+        assert_eq!(media.aes_key.as_deref(), Some("voice-aes"));
     }
 }

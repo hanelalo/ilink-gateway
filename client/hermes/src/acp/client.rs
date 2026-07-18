@@ -5,8 +5,8 @@
 //!
 //! ACP protocol flow:
 //! 1. Initialize → get capabilities
-//! 2. NewSession → create a session (or ResumeSession for existing)
-//! 3. Send UserMessageChunk → get streaming AgentMessageChunk responses
+//! 2. NewSession → create a session (or LoadSession for existing)
+//! 3. Send UserMessageChunk via session/prompt → get streaming AgentMessageChunk responses
 //! 4. CloseSession → end session
 
 use crate::error::{ClientError, Result};
@@ -101,6 +101,14 @@ pub struct PromptParams {
 #[serde(rename_all = "camelCase")]
 pub struct CloseSessionParams {
     pub session_id: String,
+}
+
+/// Parameters for the `session/load` method.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionParams {
+    pub session_id: String,
+    pub cwd: String,
 }
 
 // ------------------------------------------------------------------
@@ -289,6 +297,35 @@ impl AcpClient {
         Ok(session_id.to_string())
     }
 
+    /// Load an existing session.
+    ///
+    /// Returns the session ID string on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns ACP protocol errors if the session does not exist.
+    pub async fn load_session(&self, session_id: &str, cwd: &str) -> Result<String> {
+        let params = LoadSessionParams {
+            session_id: session_id.to_string(),
+            cwd: cwd.to_string(),
+        };
+        let params_value = serde_json::to_value(params)?;
+        let result = self
+            .send_request("session/load", Some(params_value))
+            .await?;
+
+        let sid = result
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ClientError::Acp(
+                    "session/load response missing sessionId".to_string(),
+                )
+            })?;
+
+        Ok(sid.to_string())
+    }
+
     /// Send a user message to a session and collect the complete reply text.
     ///
     /// This sends a `session/prompt` request and collects text from
@@ -361,15 +398,27 @@ impl AcpClient {
                 break;
             }
 
-            // Collect text from session/update → AgentMessageChunk → content → text
-            if let Some(text_content) = v
+            // Collect text only from session/update notifications whose
+            // sessionUpdate == "agent_message_chunk".  Other update types
+            // (agent_thought_chunk, user_message_chunk, tool_call_*, etc.)
+            // carry content.text too but must NOT be mixed into the reply.
+            let is_agent_message = v
                 .get("params")
                 .and_then(|p| p.get("update"))
-                .and_then(|u| u.get("content"))
-                .and_then(|c| c.get("text"))
-                .and_then(|t| t.as_str())
-            {
-                reply_texts.push(text_content.to_string());
+                .and_then(|u| u.get("sessionUpdate"))
+                .and_then(|s| s.as_str())
+                == Some("agent_message_chunk");
+
+            if is_agent_message {
+                if let Some(text_content) = v
+                    .get("params")
+                    .and_then(|p| p.get("update"))
+                    .and_then(|u| u.get("content"))
+                    .and_then(|c| c.get("text"))
+                    .and_then(|t| t.as_str())
+                {
+                    reply_texts.push(text_content.to_string());
+                }
             }
         }
 

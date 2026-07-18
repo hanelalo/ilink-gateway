@@ -3,7 +3,25 @@
 
 use crate::error::{GatewayError, Result};
 use crate::ilink::client::Client;
-use crate::ilink::types::{msg_type, GetUploadUrlRequest};
+use crate::ilink::types::{
+    upload_media_type, BaseInfo, GetUploadUrlRequest, ILINK_CDN_BASE_URL, msg_type,
+};
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+
+/// Outcome of [`process_media_upload`]: everything [`WeixinMessage::build_media_reply`]
+/// needs to assemble the outbound media item.
+pub struct MediaUploadResult {
+    /// Item-list `type` for sendmessage (msg_type: IMAGE/VOICE/VIDEO/FILE).
+    pub item_type: i32,
+    /// Value of the CDN upload `x-encrypted-param` response header.
+    pub encrypt_query_param: String,
+    /// API-format AES key: `base64(hex_string_of_original_key)`.
+    pub aes_key: String,
+    /// Ciphertext (encrypted, padded) size — goes into `mid_size`.
+    pub mid_size: i64,
+}
 
 /// Validates that a CDN URL belongs to an allowed WeChat CDN domain.
 #[allow(dead_code)]
@@ -93,86 +111,123 @@ pub fn build_cdn_download_url(cdn_base: &str, encrypt_query_param: &str) -> Stri
     )
 }
 
-/// Determine iLink media type from a file path extension.
-pub fn media_type_from_extension(path: &str) -> i32 {
+/// Map a file extension to both the item-list `msg_type` (used in
+/// sendmessage) and the `media_type` (used in getuploadurl).  The two
+/// numberings differ — see docs/wechat.md §4.6.
+pub fn media_types_from_extension(path: &str) -> (i32, i32) {
     let lower = path.to_lowercase();
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png")
-        || lower.ends_with(".gif") || lower.ends_with(".webp") || lower.ends_with(".bmp")
-    {
-        msg_type::IMAGE
-    } else if lower.ends_with(".silk") || lower.ends_with(".mp3") || lower.ends_with(".wav")
-        || lower.ends_with(".ogg") || lower.ends_with(".amr") || lower.ends_with(".aac")
-    {
-        msg_type::VOICE
-    } else if lower.ends_with(".mp4") || lower.ends_with(".mov") || lower.ends_with(".avi")
-        || lower.ends_with(".mkv") || lower.ends_with(".webm")
-    {
-        msg_type::VIDEO
+    let is_image = lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png")
+        || lower.ends_with(".gif") || lower.ends_with(".webp") || lower.ends_with(".bmp");
+    let is_voice = lower.ends_with(".silk") || lower.ends_with(".mp3") || lower.ends_with(".wav")
+        || lower.ends_with(".ogg") || lower.ends_with(".amr") || lower.ends_with(".aac");
+    let is_video = lower.ends_with(".mp4") || lower.ends_with(".mov") || lower.ends_with(".avi")
+        || lower.ends_with(".mkv") || lower.ends_with(".webm");
+
+    if is_image {
+        (msg_type::IMAGE, upload_media_type::IMAGE)
+    } else if is_voice {
+        (msg_type::VOICE, upload_media_type::VOICE)
+    } else if is_video {
+        (msg_type::VIDEO, upload_media_type::VIDEO)
     } else {
-        msg_type::FILE
+        (msg_type::FILE, upload_media_type::FILE)
     }
 }
 
-/// Process a local file for CDN upload: calculate MD5, get upload URL, encrypt, upload.
+/// Process a local file for CDN upload: calculate MD5, get upload URL,
+/// encrypt (AES-128-ECB + PKCS7), upload ciphertext, and return
+/// everything needed to assemble the outbound media item.
 ///
-/// Returns (item_type, encrypt_query_param, aes_key_hex) for use in build_media_reply.
+/// `to_user_id` is required by the iLink getuploadurl endpoint.
 pub async fn process_media_upload(
     ilink_client: &Client,
     token: &str,
+    to_user_id: &str,
     file_path: &str,
-) -> Result<(i32, String, String)> {
-    // 1. Read file
-    let file_data = std::fs::read(file_path)?;
-    let file_size = file_data.len() as i64;
-    use md5::{Digest, Md5};
-    let file_md5 = format!("{:x}", Md5::digest(&file_data));
-    let item_type = media_type_from_extension(file_path);
-
-    // 2. Generate random 16-byte AES key as hex string
+) -> Result<MediaUploadResult> {
     use rand::Rng;
+
+    // 1. Read file, compute raw MD5 + size, determine media types.
+    let file_data = std::fs::read(file_path)?;
+    let raw_size = file_data.len() as i64;
+    use md5::{Digest, Md5};
+    let raw_md5 = format!("{:x}", Md5::digest(&file_data));
+    let (item_type, upload_media_type_value) = media_types_from_extension(file_path);
+
+    // 2. Random filekey (32 hex chars) and 16-byte AES key.
+    let filekey_bytes: [u8; 16] = rand::rng().random();
+    let filekey = hex::encode(&filekey_bytes);
     let aes_key_bytes: [u8; 16] = rand::rng().random();
     let aes_key_hex = hex::encode(&aes_key_bytes);
 
-    // 3. Get upload URL from iLink
+    // 3. AES-128-ECB encrypt (PKCS7 padding applied inside).
+    let encrypted = aes128_ecb_encrypt(&aes_key_bytes, &file_data)?;
+    let padded_size = encrypted.len() as i64;
+
+    // 4. Get upload URL from iLink.
     let req = GetUploadUrlRequest {
-        aes_key: aes_key_hex.clone(),
-        item_type,
-        file_size,
-        file_md5,
-        base_info: None,
+        filekey,
+        media_type: upload_media_type_value,
+        to_user_id: to_user_id.to_string(),
+        rawsize: raw_size,
+        rawfilemd5: raw_md5,
+        filesize: padded_size,
+        no_need_thumb: true,
+        aeskey: aes_key_hex.clone(),
+        base_info: Some(BaseInfo::channel_default()),
     };
     let upload_resp = ilink_client.get_upload_url(token, &req).await?;
 
-    let cdn_url = upload_resp.cdnurl.ok_or_else(|| {
-        GatewayError::Ilink("getuploadurl returned no cdnurl".to_string())
-    })?;
-    let resp_aes_key = upload_resp.aes_key.ok_or_else(|| {
-        GatewayError::Ilink("getuploadurl returned no aes_key".to_string())
+    // Prefer upload_full_url; fall back to upload_param appended to CDN base.
+    let cdn_upload_url = upload_resp.upload_full_url.or_else(|| {
+        upload_resp
+            .upload_param
+            .as_ref()
+            .map(|p| format!("{}/c2c?{}", ILINK_CDN_BASE_URL.trim_end_matches('/'), p))
+    });
+    let cdn_upload_url = cdn_upload_url.ok_or_else(|| {
+        GatewayError::Ilink("getuploadurl returned no upload URL".to_string())
     })?;
 
-    // 4. AES-128-ECB encrypt the file data
-    let encrypted = aes128_ecb_encrypt(&aes_key_bytes, &file_data)?;
-
-    // 5. Upload encrypted data to CDN via PUT
+    // 5. POST ciphertext to CDN, read x-encrypted-param from response header.
     let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
         .build()?;
-    let upload_resp = http_client
-        .put(&cdn_url)
+    let cdn_resp = http_client
+        .post(&cdn_upload_url)
         .header("Content-Type", "application/octet-stream")
         .body(encrypted)
         .send()
         .await?;
-    if !upload_resp.status().is_success() {
+    if !cdn_resp.status().is_success() {
         return Err(GatewayError::Ilink(format!(
             "CDN upload returned HTTP {}",
-            upload_resp.status()
+            cdn_resp.status()
         )));
     }
+    let encrypt_query_param = cdn_resp
+        .headers()
+        .get("x-encrypted-param")
+        .ok_or_else(|| {
+            GatewayError::Ilink(
+                "CDN upload response missing x-encrypted-param header".to_string(),
+            )
+        })?
+        .to_str()
+        .map_err(|e| GatewayError::Ilink(format!("invalid x-encrypted-param header: {e}")))?
+        .to_string();
 
-    // 6. Extract encrypt_query_param from CDN URL
-    let encrypt_query_param = cdn_url.split('?').nth(1).unwrap_or(&cdn_url).to_string();
+    // 6. aes_key for sendmessage = base64(hex_string_of_original_key).
+    //    NOT base64(raw_bytes) — see docs/wechat.md §5.
+    let aes_key_for_api = BASE64.encode(aes_key_hex.as_bytes());
 
-    Ok((item_type, encrypt_query_param, resp_aes_key))
+    Ok(MediaUploadResult {
+        item_type,
+        encrypt_query_param,
+        aes_key: aes_key_for_api,
+        mid_size: padded_size,
+    })
 }
 
 use aes::Aes128;
@@ -253,47 +308,47 @@ mod tests {
     }
 
     #[test]
-    fn test_media_type_from_extension_image() {
-        assert_eq!(media_type_from_extension("photo.jpg"), msg_type::IMAGE);
-        assert_eq!(media_type_from_extension("photo.jpeg"), msg_type::IMAGE);
-        assert_eq!(media_type_from_extension("photo.png"), msg_type::IMAGE);
-        assert_eq!(media_type_from_extension("photo.gif"), msg_type::IMAGE);
-        assert_eq!(media_type_from_extension("photo.webp"), msg_type::IMAGE);
-        assert_eq!(media_type_from_extension("photo.bmp"), msg_type::IMAGE);
+    fn test_media_types_from_extension_image() {
+        assert_eq!(media_types_from_extension("photo.jpg"), (msg_type::IMAGE, upload_media_type::IMAGE));
+        assert_eq!(media_types_from_extension("photo.jpeg"), (msg_type::IMAGE, upload_media_type::IMAGE));
+        assert_eq!(media_types_from_extension("photo.png"), (msg_type::IMAGE, upload_media_type::IMAGE));
+        assert_eq!(media_types_from_extension("photo.gif"), (msg_type::IMAGE, upload_media_type::IMAGE));
+        assert_eq!(media_types_from_extension("photo.webp"), (msg_type::IMAGE, upload_media_type::IMAGE));
+        assert_eq!(media_types_from_extension("photo.bmp"), (msg_type::IMAGE, upload_media_type::IMAGE));
     }
 
     #[test]
-    fn test_media_type_from_extension_voice() {
-        assert_eq!(media_type_from_extension("audio.silk"), msg_type::VOICE);
-        assert_eq!(media_type_from_extension("audio.mp3"), msg_type::VOICE);
-        assert_eq!(media_type_from_extension("audio.wav"), msg_type::VOICE);
-        assert_eq!(media_type_from_extension("audio.ogg"), msg_type::VOICE);
-        assert_eq!(media_type_from_extension("audio.amr"), msg_type::VOICE);
-        assert_eq!(media_type_from_extension("audio.aac"), msg_type::VOICE);
+    fn test_media_types_from_extension_voice() {
+        assert_eq!(media_types_from_extension("audio.silk"), (msg_type::VOICE, upload_media_type::VOICE));
+        assert_eq!(media_types_from_extension("audio.mp3"), (msg_type::VOICE, upload_media_type::VOICE));
+        assert_eq!(media_types_from_extension("audio.wav"), (msg_type::VOICE, upload_media_type::VOICE));
+        assert_eq!(media_types_from_extension("audio.ogg"), (msg_type::VOICE, upload_media_type::VOICE));
+        assert_eq!(media_types_from_extension("audio.amr"), (msg_type::VOICE, upload_media_type::VOICE));
+        assert_eq!(media_types_from_extension("audio.aac"), (msg_type::VOICE, upload_media_type::VOICE));
     }
 
     #[test]
-    fn test_media_type_from_extension_video() {
-        assert_eq!(media_type_from_extension("video.mp4"), msg_type::VIDEO);
-        assert_eq!(media_type_from_extension("video.mov"), msg_type::VIDEO);
-        assert_eq!(media_type_from_extension("video.avi"), msg_type::VIDEO);
-        assert_eq!(media_type_from_extension("video.mkv"), msg_type::VIDEO);
-        assert_eq!(media_type_from_extension("video.webm"), msg_type::VIDEO);
+    fn test_media_types_from_extension_video() {
+        assert_eq!(media_types_from_extension("video.mp4"), (msg_type::VIDEO, upload_media_type::VIDEO));
+        assert_eq!(media_types_from_extension("video.mov"), (msg_type::VIDEO, upload_media_type::VIDEO));
+        assert_eq!(media_types_from_extension("video.avi"), (msg_type::VIDEO, upload_media_type::VIDEO));
+        assert_eq!(media_types_from_extension("video.mkv"), (msg_type::VIDEO, upload_media_type::VIDEO));
+        assert_eq!(media_types_from_extension("video.webm"), (msg_type::VIDEO, upload_media_type::VIDEO));
     }
 
     #[test]
-    fn test_media_type_from_extension_file() {
-        assert_eq!(media_type_from_extension("doc.pdf"), msg_type::FILE);
-        assert_eq!(media_type_from_extension("archive.zip"), msg_type::FILE);
-        assert_eq!(media_type_from_extension("data.txt"), msg_type::FILE);
-        assert_eq!(media_type_from_extension("no_extension"), msg_type::FILE);
+    fn test_media_types_from_extension_file() {
+        assert_eq!(media_types_from_extension("doc.pdf"), (msg_type::FILE, upload_media_type::FILE));
+        assert_eq!(media_types_from_extension("archive.zip"), (msg_type::FILE, upload_media_type::FILE));
+        assert_eq!(media_types_from_extension("data.txt"), (msg_type::FILE, upload_media_type::FILE));
+        assert_eq!(media_types_from_extension("no_extension"), (msg_type::FILE, upload_media_type::FILE));
     }
 
     #[test]
-    fn test_media_type_from_extension_case_insensitive() {
-        assert_eq!(media_type_from_extension("photo.JPG"), msg_type::IMAGE);
-        assert_eq!(media_type_from_extension("audio.MP3"), msg_type::VOICE);
-        assert_eq!(media_type_from_extension("video.MP4"), msg_type::VIDEO);
+    fn test_media_types_from_extension_case_insensitive() {
+        assert_eq!(media_types_from_extension("photo.JPG"), (msg_type::IMAGE, upload_media_type::IMAGE));
+        assert_eq!(media_types_from_extension("audio.MP3"), (msg_type::VOICE, upload_media_type::VOICE));
+        assert_eq!(media_types_from_extension("video.MP4"), (msg_type::VIDEO, upload_media_type::VIDEO));
     }
 
     #[tokio::test]
@@ -306,37 +361,41 @@ mod tests {
         let media_path = tmp_dir.path().join("test.jpg");
         std::fs::write(&media_path, b"fake image data").unwrap();
 
-        // Mock getuploadurl
-        let cdn_url = format!("{}/cdn/upload?encrypted_param_123", server.url());
+        // Mock getuploadurl — returns upload_full_url
         let upload_mock = server
             .mock("POST", "/ilink/bot/getuploadurl")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(serde_json::json!({
                 "ret": 0,
-                "cdnurl": cdn_url,
-                "aes_key": "0123456789abcdef0123456789abcdef"
+                "upload_full_url": format!("{}/cdn/upload", server.url()),
             }).to_string())
             .create();
 
-        // Mock CDN upload (PUT)
+        // Mock CDN upload (POST) — returns x-encrypted-param header
         let cdn_mock = server
-            .mock("PUT", "/cdn/upload")
-            .match_query(mockito::Matcher::Any)
+            .mock("POST", "/cdn/upload")
             .with_status(200)
+            .with_header("x-encrypted-param", "encrypted_param_123")
             .create();
 
         let result = process_media_upload(
             &client,
             "test-token",
+            "user@wx",
             &media_path.to_string_lossy(),
-        ).await;
+        )
+        .await;
 
         assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
-        let (item_type, encrypt_query_param, aes_key) = result.unwrap();
-        assert_eq!(item_type, msg_type::IMAGE);
-        assert_eq!(encrypt_query_param, "encrypted_param_123");
-        assert_eq!(aes_key, "0123456789abcdef0123456789abcdef");
+        let upload = result.unwrap();
+        assert_eq!(upload.item_type, msg_type::IMAGE);
+        assert_eq!(upload.encrypt_query_param, "encrypted_param_123");
+        // aes_key must be base64(hex_string), not base64(raw_bytes).
+        // hex_string is 32 chars for a 16-byte key, so base64 decodes to 32 bytes.
+        let decoded = BASE64.decode(upload.aes_key.as_bytes()).unwrap();
+        assert_eq!(decoded.len(), 32, "aes_key should be base64(32-char hex), got {} decoded bytes", decoded.len());
+        assert!(upload.mid_size > 0);
 
         upload_mock.assert();
         cdn_mock.assert();

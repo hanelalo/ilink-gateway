@@ -82,7 +82,7 @@ client/hermes/src/
 └── error.rs          # ClientError enum
 ```
 
-**ACP protocol**: Hermes' Agent Client Protocol runs `hermes acp` as a subprocess, communicating via JSON-RPC 2.0 over stdin/stdout. Key methods: `initialize` → `sessions/new` → `sessions/{id}/send` (UserMessageChunk) → collect AgentMessageChunk response → `sessions/{id}/close`.
+**ACP protocol**: Hermes' Agent Client Protocol runs `hermes acp` as a subprocess, communicating via JSON-RPC 2.0 over stdin/stdout. Key methods: `initialize` → `session/new` → `session/prompt` (streaming) → collect AgentMessageChunk from `session/update` notifications → `session/close`. Session recovery via `session/load`.
 
 ## Testing
 

@@ -121,10 +121,46 @@ impl HermesClient {
                 let session_id = match self.sessions.get(&msg.from_user) {
                     Some(sid) => sid.clone(),
                     None => {
-                        // Gateway gave us a session_id — use it
+                        // Gateway gave us a session_id — try to load it
                         if let Some(ref sid) = msg.session_id {
-                            self.sessions.insert(msg.from_user.clone(), sid.clone());
-                            sid.clone()
+                            match acp.load_session(sid, &self.config.hermes_cwd).await {
+                                Ok(_) => {
+                                    tracing::info!(
+                                        "Loaded ACP session {} for user {}",
+                                        sid,
+                                        msg.from_user
+                                    );
+                                    self.sessions.insert(msg.from_user.clone(), sid.clone());
+                                    sid.clone()
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to load ACP session {} for user {}: {} — creating new",
+                                        sid,
+                                        msg.from_user,
+                                        e
+                                    );
+                                    match acp.new_session(&self.config.hermes_cwd).await {
+                                        Ok(new_sid) => {
+                                            tracing::info!(
+                                                "Created ACP session {} for user {}",
+                                                new_sid,
+                                                msg.from_user
+                                            );
+                                            self.sessions.insert(msg.from_user.clone(), new_sid.clone());
+                                            new_sid
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to create ACP session for user {}: {}",
+                                                msg.from_user,
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                         } else {
                             // First time — create a new session
                             match acp.new_session(&self.config.hermes_cwd).await {
@@ -150,10 +186,12 @@ impl HermesClient {
                     }
                 };
 
-                // Forward the message to Hermes
+                // Forward the message to Hermes with ACP timeout
                 let from_user = msg.from_user.clone();
-                match acp.send_message(&session_id, &acp_text).await {
-                    Ok(reply) => {
+                let acp_timeout = std::time::Duration::from_secs(self.config.acp_timeout_secs);
+                match tokio::time::timeout(acp_timeout, acp.send_message(&session_id, &acp_text)).await
+                {
+                    Ok(Ok(reply)) => {
                         // Send the reply back to the gateway.
                         // Also report the session ID if we created it
                         // (gateway already knows it via local cache or
@@ -172,12 +210,22 @@ impl HermesClient {
                             );
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::error!(
                             "ACP error for session {} (user {}): {} — closing and removing",
                             session_id,
                             from_user,
                             e
+                        );
+                        let _ = acp.close_session(&session_id).await;
+                        self.sessions.remove(&from_user);
+                    }
+                    Err(_elapsed) => {
+                        tracing::error!(
+                            "ACP timeout ({}s) for session {} (user {}) — closing and removing",
+                            self.config.acp_timeout_secs,
+                            session_id,
+                            from_user,
                         );
                         let _ = acp.close_session(&session_id).await;
                         self.sessions.remove(&from_user);
