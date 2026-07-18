@@ -1,97 +1,97 @@
 # Claude Code Adapter
 
-通过微信管理 Claude Code 工作会话的适配器。作为 wechat-gateway 的 agent，接收微信消息并转发到 Claude Code SDK，支持多用户、多 workspace 管理。
+A WeChat-connected Claude Code session manager. Registers as an agent with wechat-gateway, receives WeChat messages, and forwards them to Claude Code via `@anthropic-ai/claude-agent-sdk`. Supports multi-user, multi-workspace management.
 
-**状态**: 开发完成，共 189 个单元测试，覆盖所有模块。
+**Status**: Complete with 189 unit tests across all modules.
 
-## 前置要求
+## Prerequisites
 
 - Node.js >= 18
 - [Claude Code](https://claude.ai/code) CLI (`npm install -g @anthropic-ai/claude-code`)
-- Claude API Key (配置在 Claude Code 中)
-- [wechat-gateway](https://github.com/hanelalo/wechat-gateway) 运行中
+- Claude API Key (configured in Claude Code)
+- [wechat-gateway](https://github.com/hanelalo/wechat-gateway) running
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CLAUDE_GATEWAY_URL` | `http://127.0.0.1:8765` | gateway HTTP API 地址 |
-| `CLAUDE_GATEWAY_AGENT_NAME` | `claude` | 注册的 agent 名称 |
-| `CLAUDE_MODEL` | `sonnet` | Claude 模型 |
-| `CLAUDE_CWD` | `process.cwd()` | 默认工作目录 |
-| `CLAUDE_POLL_INTERVAL` | `1000` | 轮询间隔(毫秒) |
-| `CLAUDE_EFFORT` | `medium` | Claude Code effort 级别 |
-| `CLAUDE_SESSION_STORE_PATH` | `~/.wechat-gateway/claude-sessions.json` | 会话持久化路径 |
-| `HTTP_PROXY` / `HTTPS_PROXY` | - | HTTP 代理配置 |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_GATEWAY_URL` | `http://127.0.0.1:8765` | Gateway HTTP API URL |
+| `CLAUDE_GATEWAY_AGENT_NAME` | `claude` | Agent name for registration |
+| `CLAUDE_MODEL` | `sonnet` | Claude model |
+| `CLAUDE_CWD` | `process.cwd()` | Default working directory |
+| `CLAUDE_POLL_INTERVAL` | `1000` | Poll interval (ms) |
+| `CLAUDE_EFFORT` | `medium` | Claude Code effort level |
+| `CLAUDE_SESSION_STORE_PATH` | `~/.wechat-gateway/claude-sessions.json` | Session persistence path |
+| `HTTP_PROXY` / `HTTPS_PROXY` | - | HTTP proxy configuration |
 
-## 快速启动
+## Quick Start
 
 ```bash
-# 1. 配置 Claude Code（如果尚未完成）
+# 1. Configure Claude Code (if not already done)
 claude
 
-# 2. 启动 gateway
+# 2. Start gateway
 cd /path/to/wechat-gateway/gateway
 cargo run
 
-# 3. 启动 adapter
+# 3. Start adapter
 cd /path/to/wechat-gateway/client/claude-code-adapter
 npx tsx src/index.ts
 ```
 
-## WeChat 交互命令
+## WeChat Commands
 
-在微信中发送以下命令控制 adapter：
+Send these commands from WeChat to control the adapter:
 
-| 命令 | 说明 |
-|------|------|
-| **Workspace 管理** | |
-| `/cd` | 查看所有 workspace 和别名 |
-| `/cd <名称>` | 切换 workspace（支持别名、路径 basename、绝对路径） |
-| `/cd + <别名> [路径]` | 添加别名（不指定路径则使用当前 workspace） |
-| `/cd - <别名>` | 删除别名 |
-| `/cd close <名称>` | 关闭 workspace（中止运行中的 query 并清除 session） |
-| **工具审批** | |
-| `/approve` | 批准当前工具调用 |
-| `/deny` | 拒绝当前工具调用 |
-| `/approve session` | 批准并将该工具加入 session 白名单 |
-| `/approve on` | 切换为自动审批模式（不再询问工具权限） |
-| `/approve off` | 切换回交互审批模式 |
+| Command | Description |
+|---------|-------------|
+| **Workspace Management** | |
+| `/cd` | List all workspaces and aliases |
+| `/cd <name>` | Switch workspace (supports aliases, path basename, absolute path) |
+| `/cd + <alias> [path]` | Add an alias (uses current workspace if path is omitted) |
+| `/cd - <alias>` | Remove an alias |
+| `/cd close <name>` | Close workspace (abort running query and clear session) |
+| **Tool Approval** | |
+| `/approve` | Approve current tool call |
+| `/deny` | Deny current tool call |
+| `/approve session` | Approve and whitelist this tool for the session |
+| `/approve on` | Switch to auto-approve mode |
+| `/approve off` | Switch back to interactive approval mode |
 
-## 消息路由流程
+## Message Routing Flow
 
 ```
-微信消息 → gateway→ poll → adapter 收到消息
-  ├── /cd 命令 → handleCdCommand() → 直接处理并回复
-  ├── /approve|/deny → 解析审批指令 → 处理 pendingApproval 或切换模式
-  └── 其他文本 → 根据 activeCwd 查找 RunningQuery
-        ├── 运行中 → 入队 messageQueue（排队等待）
-        └── 空闲 → 启动 Claude Code session
-              ├── 首次 → query({ prompt, cwd }) → onSessionInit 保存 sessionId
-              └── 恢复 → query({ prompt, cwd, resume: sessionId })
+WeChat message → gateway → poll → adapter receives message
+  ├── /cd command → handleCdCommand() → process and reply directly
+  ├── /approve|/deny → parse approval command → resolve pendingApproval or toggle mode
+  └── other text → find RunningQuery by activeCwd
+        ├── already running → enqueue to messageQueue (wait in line)
+        └── idle → start Claude Code session
+              ├── first time → query({ prompt, cwd }) → save sessionId via onSessionInit
+              └── resume → query({ prompt, cwd, resume: sessionId })
 ```
 
-## 项目结构
+## Project Structure
 
 ```
 src/
-├── index.ts              # 入口：注册、轮询、消息路由、进程生命周期
-├── config.ts             # 环境变量配置加载
-├── gateway-client.ts     # Gateway HTTP API 封装
-├── session-store.ts      # Session 持久化（wxid → cwd → sessionId）
-├── query-manager.ts      # 运行时查询状态管理
-├── claude-session.ts     # Claude SDK query() 封装
-├── cd-command.ts         # /cd 命令处理（路径解析、别名管理）
-├── approval.ts           # 审批命令解析 + 超时
-├── formatter.ts          # Markdown 转纯文本
-├── streaming-batcher.ts  # 流式合批 + 超时提示 + 长回复分段
+├── index.ts              # Entry: register, poll, message routing, process lifecycle
+├── config.ts             # Environment variable loading
+├── gateway-client.ts     # Gateway HTTP API wrapper
+├── session-store.ts      # Session persistence (wxid → cwd → sessionId)
+├── query-manager.ts      # Runtime query state management
+├── claude-session.ts     # Claude SDK query() wrapper
+├── cd-command.ts         # /cd command handling (path resolution, alias management)
+├── approval.ts           # Approval command parsing + timeout
+├── formatter.ts          # Markdown to plain text
+├── streaming-batcher.ts  # Stream batching + idle alert + long reply splitting
 │
-# 测试文件（.test.ts 与源码一一对应）
+# Test files (.test.ts mirrors each source file)
 ├── config.test.ts
 ├── gateway-client.test.ts
 ├── session-store.test.ts
 ├── query-manager.test.ts
-├── claude-session.test.ts  # SDK 注入 mock
+├── claude-session.test.ts
 ├── cd-command.test.ts
 ├── approval.test.ts
 ├── formatter.test.ts
@@ -99,44 +99,44 @@ src/
 ├── index.test.ts
 ```
 
-## 核心特性
+## Core Features
 
-- **多轮对话**: sessionId 通过 `onSessionInit` 回调持久化到 JSON 文件，下次消息自动 `resumeSessionId`，保持完整上下文
-- **跨目录并行**: 不同 cwd 的 RunningQuery 独立存储（`Map<wxid, Map<cwd, RunningQuery>>`），`/cd` 切换不影响已在运行的 session
-- **流式合批**: 文本缓存到 buffer，>1500 字符自动 flush；收到 tool_use 先 flush buffer；result 到达 flush 剩余 buffer；2s 空闲自动 flush
-- **超时提示**: 30 秒无活动发送 "Claude 正在处理中..." 到微信，不中断 session
-- **长回复分段**: 超过 3800 字符分成 `[1/N]`, `[2/N]`... 多段发送，段间间隔 500ms
-- **工具审批**: 交互审批（微信内 `/approve`/`/deny`）+ session 白名单 + 自动模式；60s 超时自动拒绝
-- **安全控制**: 常驻黑名单 `Bash(sudo:*)`, `Bash(rm -rf:*)`, `Bash(chmod:*)`；首次 session 预填 `Read/Glob/Grep` 白名单
-- **消息排队**: 同一 wxid + cwd 的后续消息自动排队，当前 session 结束后依次处理
-- **优雅关闭**: SIGINT/SIGTERM 时 abort 所有 query、resolve 所有 pending approval 为 deny、3s 后 exit
-- **全局异常**: `uncaughtException` / `unhandledRejection` 全局处理，防止进程意外退出
-- **轮询自愈**: poll 出错时打印警告并继续，下次轮询自动重试；404 自动重新注册
+- **Multi-turn dialogue**: sessionId is persisted to JSON file via `onSessionInit` callback; next message automatically uses `resumeSessionId` for full context
+- **Cross-directory parallelism**: Different cwd's RunningQuery are stored independently (`Map<wxid, Map<cwd, RunningQuery>>`); `/cd` switching does not affect running sessions
+- **Stream batching**: Text buffered until >1500 chars auto-flush; tool_use flushes buffer first; result flushes remaining; 2s idle auto-flush
+- **Idle alert**: 30s no activity sends "Claude is processing..." to WeChat without interrupting the session
+- **Long reply splitting**: Replies exceeding 3800 chars are split into `[1/N]`, `[2/N]`... segments sent 500ms apart
+- **Tool approval**: Interactive approval (`/approve`/`/deny` in WeChat) + session whitelist + auto mode; 60s timeout auto-denies
+- **Security controls**: Permanent blacklist `Bash(sudo:*)`, `Bash(rm -rf:*)`, `Bash(chmod:*)`; first-time sessions pre-whitelist `Read/Glob/Grep`
+- **Message queuing**: Subsequent messages for the same wxid + cwd are automatically queued and processed sequentially after the current session ends
+- **Graceful shutdown**: On SIGINT/SIGTERM, abort all queries, resolve all pending approvals as deny, exit after 3s
+- **Global error handling**: `uncaughtException` / `unhandledRejection` global handlers prevent unexpected process exit
+- **Poll self-healing**: Poll errors print warnings and continue; next poll retries automatically; 404 triggers re-registration
 
-## 测试
+## Testing
 
-使用 Vitest 测试框架。所有测试不依赖外部服务（SDK 和 HTTP 皆注入 mock）。
+Uses Vitest. All tests are mocked (SDK and HTTP) — no external services required.
 
 ```bash
-# 运行全部测试
+# Run all tests
 npm test
 
-# 持续测试
+# Watch mode
 npm run test:watch
 
-# 覆盖测试
+# With coverage
 npx vitest run --coverage
 ```
 
-## 开发
+## Development
 
 ```bash
-# 安装依赖
+# Install dependencies
 npm install
 
-# 运行
+# Run
 npx tsx src/index.ts
 
-# 构建
+# Build
 npm run build
 ```
