@@ -699,21 +699,19 @@ async fn qr_login_and_save(
 
 /// Attempt to render a QR code image to the terminal.
 ///
-/// The image content is a base64-encoded PNG.  We decode it, convert to
-/// grayscale, and render using the `qrcode` crate's terminal output.
+/// The image content may be a base64-encoded PNG or raw image bytes.
+/// Try base64 first, then try loading raw bytes directly.
 fn render_qr_terminal(img_content: &str) {
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
 
+    // Try base64 decode first
     let img_bytes = match BASE64.decode(img_content) {
         Ok(b) => b,
-        Err(_) => {
-            tracing::warn!("failed to decode QR image (not base64?)");
-            return;
-        }
+        Err(_) => img_content.as_bytes().to_vec(),
     };
 
-    // Try to load as PNG and convert to a qrcode::QrCode for terminal rendering
+    // Try to load as PNG and convert to grayscale for ASCII render
     match image::load_from_memory(&img_bytes) {
         Ok(img) => {
             let gray = img.to_luma8();
