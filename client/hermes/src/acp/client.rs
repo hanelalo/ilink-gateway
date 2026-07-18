@@ -59,20 +59,22 @@ pub struct AcpError {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
-    pub protocol_version: Option<String>,
-    pub capabilities: serde_json::Value,
-    pub client_info: serde_json::Value,
+    pub protocol_version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_capabilities: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_info: Option<serde_json::Value>,
 }
 
 impl Default for InitializeParams {
     fn default() -> Self {
         Self {
-            protocol_version: Some("0.1".to_string()),
-            capabilities: serde_json::json!({}),
-            client_info: serde_json::json!({
+            protocol_version: 1,
+            client_capabilities: Some(serde_json::json!({})),
+            client_info: Some(serde_json::json!({
                 "name": "wechat-gateway-hermes",
                 "version": "0.1.0",
-            }),
+            })),
         }
     }
 }
@@ -463,17 +465,17 @@ mod tests {
     #[test]
     fn test_initialize_params_serialization() {
         let params = InitializeParams {
-            protocol_version: Some("0.1".to_string()),
-            capabilities: serde_json::json!({}),
-            client_info: serde_json::json!({
+            protocol_version: 1,
+            client_capabilities: Some(serde_json::json!({})),
+            client_info: Some(serde_json::json!({
                 "name": "wechat-gateway-hermes",
                 "version": "0.1.0",
-            }),
+            })),
         };
 
         let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["protocolVersion"], "0.1");
-        assert_eq!(json["capabilities"], serde_json::json!({}));
+        assert_eq!(json["protocolVersion"], 1);
+        assert!(json.get("clientCapabilities").is_some());
         assert_eq!(json["clientInfo"]["name"], "wechat-gateway-hermes");
         assert_eq!(json["clientInfo"]["version"], "0.1.0");
     }
@@ -483,8 +485,8 @@ mod tests {
         let params = InitializeParams::default();
 
         let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["protocolVersion"], "0.1");
-        assert_eq!(json["capabilities"], serde_json::json!({}));
+        assert_eq!(json["protocolVersion"], 1);
+        assert!(json.get("clientCapabilities").is_some());
         assert_eq!(json["clientInfo"]["name"], "wechat-gateway-hermes");
     }
 
