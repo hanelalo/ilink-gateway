@@ -187,10 +187,10 @@ impl Router {
     pub fn handle_incoming(&mut self, msg: &WeixinMessage) -> Result<Option<String>> {
         // Admission policy check — drop disallowed senders silently.
         let from_user = msg.from_user_id.as_deref().unwrap_or("");
-        if msg.group_id.is_some() {
-            let gid = msg.group_id.as_deref().unwrap_or("");
-            if !self.is_group_allowed(gid) {
-                tracing::debug!("group message from {gid} dropped by group policy");
+        let group_id = msg.group_id.as_deref().unwrap_or("");
+        if !group_id.is_empty() {
+            if !self.is_group_allowed(group_id) {
+                tracing::debug!("group message from {group_id} dropped by group policy");
                 return Ok(None);
             }
         } else if !self.is_dm_allowed(from_user) {
