@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(HashMap::new()));
     let typing_ticket_cache = TypingTicketCache::new();
     let ws_registry = WsRegistry::new();
+    let http_client = reqwest::Client::new();
     let _state = AppState {
         router: router_arc.clone(),
         reply_tx: reply_tx.clone(),
@@ -130,9 +131,6 @@ async fn main() -> Result<()> {
     if let Err(e) = client.notify_start(&token).await {
         tracing::warn!("notify_start failed (will retry in loop): {e}");
     }
-
-    // 6c. Create a shared reqwest::Client for media downloads
-    let http_client = reqwest::Client::new();
 
     // 7b. Spawn reply processor background task
     let mut reply_handle = {
@@ -185,11 +183,16 @@ async fn main() -> Result<()> {
             biased;
             _ = shutdown_rx.changed() => {
                 tracing::info!("shutdown signal received, exiting long-poll loop");
-                // Await reply processor with 10s timeout
+                // Drop our reply_tx references so the handler can detect shutdown
+                // (remaining references in server_state are dropped when server task stops)
+                tracing::info!("waiting for reply processor to finish...");
                 tokio::select! {
-                    _ = &mut reply_handle => {},
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                        tracing::warn!("reply processor did not finish within 10s, abandoning");
+                    biased;
+                    _ = &mut reply_handle => {
+                        tracing::info!("reply processor finished");
+                    },
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                        tracing::warn!("reply processor did not finish within 3s, dropping");
                     }
                 }
                 break Ok(());
