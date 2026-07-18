@@ -603,12 +603,15 @@ async fn qr_login_and_save(
         .qrcode
         .ok_or_else(|| GatewayError::Ilink("QR code key is empty".to_string()))?;
 
-    // Step 2: render QR to terminal (if image content available)
-    if let Some(img_content) = &qr_resp.qrcode_img_content {
-        render_qr_terminal(img_content);
-    } else {
-        tracing::info!("Scan the QR code to log in to WeChat");
-    }
+    // Step 2: render QR to terminal
+    // qrcode_img_content is a WeChat liteapp URL; the QR code must encode
+    // this URL (not the raw hex key) so WeChat opens the liteapp on scan.
+    let qr_scan_data = qr_resp
+        .qrcode_img_content
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&qrcode);
+    render_qr(qr_scan_data);
 
     // Step 3: poll until confirmed
     let (token, base_url, account_id, user_id) = loop {
@@ -664,44 +667,27 @@ async fn qr_login_and_save(
     Ok((token, base_url))
 }
 
-/// Attempt to render a QR code image to the terminal.
+/// Render a QR code in the terminal from the scan data (liteapp URL or hex key).
 ///
-/// The image content may be a base64-encoded PNG or raw image bytes.
-/// Try base64 first, then try loading raw bytes directly.
-fn render_qr_terminal(img_content: &str) {
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use base64::Engine;
-
-    // Try base64 decode first
-    let img_bytes = match BASE64.decode(img_content) {
-        Ok(b) => b,
-        Err(_) => img_content.as_bytes().to_vec(),
-    };
-
-    // Try to load as PNG and convert to grayscale for ASCII render
-    match image::load_from_memory(&img_bytes) {
-        Ok(img) => {
-            let gray = img.to_luma8();
-            // Find a reasonable threshold and render a simple ASCII version
-            // by sampling the center of each "pixel block".
-            let (w, h) = gray.dimensions();
-            let block_size = (w.min(h) / 25).max(1);
-            tracing::info!("Scan the QR code above with your WeChat app");
-            for y in (0..h).step_by(block_size as usize) {
-                let mut line = String::new();
-                for x in (0..w).step_by(block_size as usize) {
-                    let pixel = gray.get_pixel(x, y);
-                    if pixel.0[0] < 128 {
-                        line.push('\u{2588}'); // dark block
-                    } else {
-                        line.push(' '); // light block
-                    }
-                }
-                tracing::info!("{line}");
+/// WeChat needs to scan a full liteapp URL, not the raw hex token, so
+/// `qrcode_img_content` from the API is prioritized when present.
+fn render_qr(data: &str) {
+    match qrcode::QrCode::new(data.as_bytes()) {
+        Ok(code) => {
+            let qr_str = code
+                .render::<char>()
+                .quiet_zone(false)
+                .module_dimensions(2, 1)
+                .dark_color('\u{2588}')
+                .light_color(' ')
+                .build();
+            println!("\nScan the QR code to log in to WeChat:");
+            for line in qr_str.lines() {
+                println!("{line}");
             }
         }
-        Err(_) => {
-            tracing::info!("Scan the QR code to log in to WeChat");
+        Err(e) => {
+            tracing::warn!("failed to generate QR code from '{data}': {e}");
         }
     }
 }

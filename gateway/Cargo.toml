@@ -50,7 +50,6 @@ cipher = "0.4"
 
 # QR code terminal rendering
 qrcode = "0.14"
-image = "0.25"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
