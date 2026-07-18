@@ -6,6 +6,8 @@
 //! 3. Forward to Hermes via ACP
 //! 4. Send reply back to gateway
 
+use std::collections::HashMap;
+
 use crate::acp::client::AcpClient;
 use crate::config::Config;
 use crate::error::Result;
@@ -71,6 +73,9 @@ impl HermesClient {
     /// pending messages to the Hermes ACP, and sends replies back to
     /// the gateway.
     ///
+    /// ACP sessions are reused per WeChat user: one session per
+    /// `from_user`, created on first message and closed only on error.
+    ///
     /// # Errors
     ///
     /// Returns errors from polling or ACP communication.
@@ -80,88 +85,98 @@ impl HermesClient {
             .as_ref()
             .ok_or_else(|| crate::error::ClientError::NotConnected)?;
 
+        // Per-user ACP session cache: from_user → session_id
+        let mut sessions: HashMap<String, String> = HashMap::new();
+
         loop {
             // Check for messages from the gateway
             let messages = self.gateway.poll_messages().await?;
 
             for msg in &messages {
-                // Create a new session for each message
-                match acp.new_session(&self.config.hermes_cwd).await {
-                    Ok(session_id) => {
-                        // Log media attachments
-                        if !msg.media.is_empty() {
+                // Log media attachments
+                if !msg.media.is_empty() {
+                    tracing::info!(
+                        msg_id = %msg.id,
+                        media_count = msg.media.len(),
+                        "Message has media attachments"
+                    );
+                    for (i, m) in msg.media.iter().enumerate() {
+                        tracing::debug!(
+                            msg_id = %msg.id,
+                            media_index = i,
+                            media_type = %m.media_type,
+                            local_path = %m.local_path,
+                            "Media attachment"
+                        );
+                    }
+                }
+
+                // Build ACP message text, appending media info if present
+                let mut acp_text = msg.text.clone();
+                if !msg.media.is_empty() {
+                    let media_desc: Vec<String> = msg.media.iter().map(|m| {
+                        format!("[{}: {}]", m.media_type, m.local_path)
+                    }).collect();
+                    if !acp_text.is_empty() {
+                        acp_text.push('\n');
+                    }
+                    acp_text.push_str(&format!("[Media: {}]", media_desc.join(", ")));
+                }
+
+                // Reuse or create an ACP session for this user
+                let session_id = if let Some(sid) = sessions.get(&msg.from_user) {
+                    sid.clone()
+                } else {
+                    match acp.new_session(&self.config.hermes_cwd).await {
+                        Ok(sid) => {
                             tracing::info!(
-                                msg_id = %msg.id,
-                                media_count = msg.media.len(),
-                                "Message has media attachments"
+                                "Created ACP session {} for user {}",
+                                sid,
+                                msg.from_user
                             );
-                            for (i, m) in msg.media.iter().enumerate() {
-                                tracing::debug!(
-                                    msg_id = %msg.id,
-                                    media_index = i,
-                                    media_type = %m.media_type,
-                                    local_path = %m.local_path,
-                                    "Media attachment"
-                                );
-                            }
+                            sessions.insert(msg.from_user.clone(), sid.clone());
+                            sid
                         }
-
-                        // Build ACP message text, appending media info if present
-                        let mut acp_text = msg.text.clone();
-                        if !msg.media.is_empty() {
-                            let media_desc: Vec<String> = msg.media.iter().map(|m| {
-                                format!("[{}: {}]", m.media_type, m.local_path)
-                            }).collect();
-                            if !acp_text.is_empty() {
-                                acp_text.push('\n');
-                            }
-                            acp_text.push_str(&format!("[Media: {}]", media_desc.join(", ")));
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to create ACP session for user {}: {}",
+                                msg.from_user,
+                                e
+                            );
+                            continue;
                         }
+                    }
+                };
 
-                        // Forward the message to Hermes with media info appended
-                        match acp
-                            .send_message(&session_id, &acp_text)
+                // Forward the message to Hermes
+                match acp
+                    .send_message(&session_id, &acp_text)
+                    .await
+                {
+                    Ok(reply) => {
+                        // Send the reply back to the gateway
+                        if let Err(e) = self
+                            .gateway
+                            .send_reply(&msg.id, &reply)
                             .await
                         {
-                            Ok(reply) => {
-                                // Send the reply back to the gateway
-                                if let Err(e) = self
-                                    .gateway
-                                    .send_reply(&msg.id, &reply)
-                                    .await
-                                {
-                                    tracing::error!(
-                                        "Failed to send reply for message {}: {}",
-                                        msg.id,
-                                        e
-                                    );
-                                }
-
-                                // Close the session
-                                if let Err(e) =
-                                    acp.close_session(&session_id).await
-                                {
-                                    tracing::warn!(
-                                        "Failed to close session {}: {}",
-                                        session_id,
-                                        e
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to process message {} via ACP: {}",
-                                    msg.id,
-                                    e
-                                );
-                            }
+                            tracing::error!(
+                                "Failed to send reply for message {}: {}",
+                                msg.id,
+                                e
+                            );
                         }
                     }
                     Err(e) => {
                         tracing::error!(
-                            "Failed to create ACP session: {}",
+                            "ACP error for session {} (user {}): {} — closing and removing",
+                            session_id,
+                            msg.from_user,
                             e
                         );
+                        // Close the broken session and remove from cache
+                        let _ = acp.close_session(&session_id).await;
+                        sessions.remove(&msg.from_user);
                     }
                 }
             }
