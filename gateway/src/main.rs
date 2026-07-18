@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
     let _current_base_url = base_url;
 
     loop {
-        let resp = match client.get_updates(&sync_buf, Some(35)).await {
+        let resp = match client.get_updates(&current_token, &sync_buf, Some(35)).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("get_updates error: {e}");

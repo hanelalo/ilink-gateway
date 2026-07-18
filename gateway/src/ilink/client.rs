@@ -132,6 +132,7 @@ impl Client {
     /// empty response.
     pub async fn get_updates(
         &self,
+        token: &str,
         sync_buf: &str,
         timeout: Option<u32>,
     ) -> Result<GetUpdatesResponse> {
@@ -144,7 +145,7 @@ impl Client {
         let resp = self
             .client
             .post(&url)
-            .headers(build_headers(None))
+            .headers(build_headers(Some(token)))
             .json(&body)
             .send()
             .await?;
@@ -507,7 +508,7 @@ mod tests {
             )
             .create();
 
-        let resp = client.get_updates("buf-init", Some(30)).await.unwrap();
+        let resp = client.get_updates("test-token", "buf-init", Some(30)).await.unwrap();
         assert_eq!(resp.ret, Some(0));
         assert!(resp.msgs.is_some());
         let msgs = resp.msgs.unwrap();
@@ -539,7 +540,7 @@ mod tests {
             )
             .create();
 
-        let resp = client.get_updates("buf-same", Some(35)).await.unwrap();
+        let resp = client.get_updates("test-token", "buf-same", Some(35)).await.unwrap();
         assert_eq!(resp.ret, Some(0));
         let msgs = resp.msgs.unwrap_or_default();
         assert!(msgs.is_empty(), "no messages expected on timeout");
