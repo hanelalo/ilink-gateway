@@ -8,6 +8,7 @@
 import type { UserSessionData, SessionEntry } from './session-store.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 export interface CloseWorkspaceCallbacks {
   abort: (cwd: string) => void;
@@ -46,9 +47,12 @@ export function resolvePath(session: UserSessionData, target: string): string {
   }
 
   // 4. Absolute path — validate existence
-  if (target.startsWith('/')) {
-    if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
-      return target;
+  if (target.startsWith('/') || target.startsWith('~')) {
+    const expanded = target.startsWith('~')
+      ? target.replace(/^~/, os.homedir())
+      : target;
+    if (fs.existsSync(expanded) && fs.statSync(expanded).isDirectory()) {
+      return expanded;
     }
     return `路径不存在或不是目录: ${target}`;
   }

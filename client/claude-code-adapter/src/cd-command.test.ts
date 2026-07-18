@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { UserSessionData } from './session-store.js';
 import fs from 'node:fs';
+import os from 'node:os';
 
 vi.mock('node:fs');
 
@@ -100,6 +101,23 @@ describe('resolvePath', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false } as ReturnType<typeof fs.statSync>);
     const result = resolvePath(session, '/Users/test/file.txt');
+    expect(result).toContain('路径不存在');
+  });
+
+  it('should expand tilde to homedir and resolve absolute path', () => {
+    const session = makeSession();
+    const homedir = os.homedir();
+    const expected = `${homedir}/other-project`;
+    vi.mocked(fs.existsSync).mockImplementation((p) => (p as string) === expected);
+    vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true } as ReturnType<typeof fs.statSync>);
+    const result = resolvePath(session, '~/other-project');
+    expect(result).toBe(expected);
+  });
+
+  it('should return error when tilde path does not exist', () => {
+    const session = makeSession();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    const result = resolvePath(session, '~/nonexistent');
     expect(result).toContain('路径不存在');
   });
 
