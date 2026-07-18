@@ -88,12 +88,19 @@ pub struct NewSessionParams {
     pub session_mode: Option<String>,
 }
 
-/// Parameters for the `sessions/{id}/send` method.
+/// Parameters for the `session/prompt` method (PromptRequest).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SendMessageParams {
-    pub session_update: String,
-    pub content: serde_json::Value,
+pub struct PromptParams {
+    pub prompt: Vec<serde_json::Value>,
+    pub session_id: String,
+}
+
+/// Parameters for the `session/close` method (CloseSessionRequest).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseSessionParams {
+    pub session_id: String,
 }
 
 // ------------------------------------------------------------------
@@ -249,7 +256,7 @@ impl AcpClient {
         };
         let params_value = serde_json::to_value(params)?;
         let result = self
-            .send_request("sessions/new", Some(params_value))
+            .send_request("session/new", Some(params_value))
             .await?;
 
         let session_id = result
@@ -266,7 +273,7 @@ impl AcpClient {
 
     /// Send a user message to a session and collect the complete reply text.
     ///
-    /// This sends a `UserMessageChunk` via the `sessions/{id}/send` method.
+    /// This sends a `session/prompt` request.
     ///
     /// # Errors
     ///
@@ -276,26 +283,29 @@ impl AcpClient {
         session_id: &str,
         text: &str,
     ) -> Result<String> {
-        let method = format!("sessions/{}/send", session_id);
-        let params = SendMessageParams {
-            session_update: "user_message_chunk".to_string(),
-            content: serde_json::json!({
+        let params = PromptParams {
+            prompt: vec![serde_json::json!({
                 "type": "text",
                 "text": text,
-            }),
+            })],
+            session_id: session_id.to_string(),
         };
         let params_value = serde_json::to_value(params)?;
 
-        // Send the message and get the acknowledgment / result
+        // Send the prompt and get the response
         let result = self
-            .send_request(&method, Some(params_value))
+            .send_request("session/prompt", Some(params_value))
             .await?;
 
-        // Extract text from the response — the ACP response may contain
-        // agent message chunks or a simple text field
+        // Extract the response text — the ACP response contains a
+        // list of content blocks in the `prompt` field (since the
+        // PromptResponse schema mirrors the request's prompt field
+        // with agent content blocks), or a simple text field.
         let reply_text = result
-            .get("content")
-            .and_then(|c| c.get("text"))
+            .get("prompt")
+            .and_then(|p| p.as_array())
+            .and_then(|blocks| blocks.first())
+            .and_then(|block| block.get("text"))
             .and_then(|v| v.as_str())
             .or_else(|| result.get("text").and_then(|v| v.as_str()))
             .unwrap_or("")
@@ -310,8 +320,11 @@ impl AcpClient {
     ///
     /// Returns ACP protocol errors.
     pub async fn close_session(&self, session_id: &str) -> Result<()> {
-        let method = format!("sessions/{}/close", session_id);
-        self.send_request(&method, None).await?;
+        let params = CloseSessionParams {
+            session_id: session_id.to_string(),
+        };
+        let params_value = serde_json::to_value(params)?;
+        self.send_request("session/close", Some(params_value)).await?;
         Ok(())
     }
 
@@ -520,23 +533,38 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // SendMessageParams serialization
+    // PromptParams serialization
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_send_message_params_serialization() {
-        let params = SendMessageParams {
-            session_update: "user_message_chunk".to_string(),
-            content: serde_json::json!({
+    fn test_prompt_params_serialization() {
+        let params = PromptParams {
+            prompt: vec![serde_json::json!({
                 "type": "text",
                 "text": "hello",
-            }),
+            })],
+            session_id: "sess-123".to_string(),
         };
 
         let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["sessionUpdate"], "user_message_chunk");
-        assert_eq!(json["content"]["type"], "text");
-        assert_eq!(json["content"]["text"], "hello");
+        let prompt = json["prompt"].as_array().unwrap();
+        assert_eq!(prompt[0]["type"], "text");
+        assert_eq!(prompt[0]["text"], "hello");
+        assert_eq!(json["sessionId"], "sess-123");
+    }
+
+    // ------------------------------------------------------------------
+    // CloseSessionParams serialization
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_close_session_params_serialization() {
+        let params = CloseSessionParams {
+            session_id: "sess-xyz".to_string(),
+        };
+
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["sessionId"], "sess-xyz");
     }
 
     // ------------------------------------------------------------------
@@ -577,18 +605,19 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_send_message_formats_user_message_chunk() {
-        let params = SendMessageParams {
-            session_update: "user_message_chunk".to_string(),
-            content: serde_json::json!({
+    fn test_prompt_params_content_as_blocks() {
+        let params = PromptParams {
+            prompt: vec![serde_json::json!({
                 "type": "text",
                 "text": "Hello, Hermes!",
-            }),
+            })],
+            session_id: "sess-abc".to_string(),
         };
 
         let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["sessionUpdate"], "user_message_chunk");
-        assert_eq!(json["content"]["type"], "text");
-        assert_eq!(json["content"]["text"], "Hello, Hermes!");
+        let blocks = json["prompt"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Hello, Hermes!");
+        assert_eq!(json["sessionId"], "sess-abc");
     }
 }
