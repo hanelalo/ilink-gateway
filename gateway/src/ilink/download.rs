@@ -4,7 +4,6 @@
 //! AES-128-ECB, and saves the result to a local cache directory.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::Result;
 use crate::ilink::media::{aes128_ecb_decrypt, build_cdn_download_url, is_valid_cdn_url};
@@ -63,18 +62,18 @@ pub async fn download_media(
     Ok(file_path.to_string_lossy().to_string())
 }
 
-/// Current timestamp in milliseconds since UNIX epoch.
-#[allow(dead_code)]
-pub(crate) fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Current timestamp in milliseconds since UNIX epoch.
+    fn now_millis() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
 
     #[tokio::test]
     async fn test_download_media_rejects_non_wechat_cdn() {

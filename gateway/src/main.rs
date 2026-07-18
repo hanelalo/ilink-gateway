@@ -17,8 +17,9 @@
 //!     download CDN media for media messages, record reply context,
 //!     push to WebSocket for real-time delivery
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracing_subscriber::EnvFilter;
 
@@ -56,8 +57,8 @@ async fn main() -> Result<()> {
     // 1. Load config from environment
     let config = GatewayConfig::from_env()?;
 
-    // 2b. Extract cdn_base (trim /c2c since build_cdn_download_url adds it)
-    let cdn_base = config.cdn_base_url.trim_end_matches("/c2c").to_string();
+    // 2b. Extract cdn_base (strip /c2c since build_cdn_download_url adds it)
+    let cdn_base = config.cdn_base_url.strip_suffix("/c2c").unwrap_or(&config.cdn_base_url).to_string();
 
     // 3. Initialize tracing
     tracing_subscriber::fmt()
@@ -97,8 +98,7 @@ async fn main() -> Result<()> {
     let (reply_tx, reply_rx) = tokio::sync::mpsc::unbounded_channel::<AgentReply>();
     let message_contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let typing_ticket_cache: Arc<Mutex<HashMap<String, String>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let typing_ticket_cache = TypingTicketCache::new();
     let ws_registry = WsRegistry::new();
     let _state = AppState {
         router: router_arc.clone(),
@@ -131,8 +131,11 @@ async fn main() -> Result<()> {
         tracing::warn!("notify_start failed (will retry in loop): {e}");
     }
 
+    // 6c. Create a shared reqwest::Client for media downloads
+    let http_client = reqwest::Client::new();
+
     // 7b. Spawn reply processor background task
-    {
+    let mut reply_handle = {
         let reply_client = match IlinkClient::new(Some(base_url.clone())) {
             Ok(c) => c,
             Err(e) => {
@@ -147,8 +150,8 @@ async fn main() -> Result<()> {
         let mut rx = reply_rx;
         tokio::spawn(async move {
             handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, reply_tickets, &mut rx).await;
-        });
-    }
+        })
+    };
 
     // 8. Spawn the HTTP API server with graceful shutdown
     let server_config = config.clone();
@@ -182,8 +185,13 @@ async fn main() -> Result<()> {
             biased;
             _ = shutdown_rx.changed() => {
                 tracing::info!("shutdown signal received, exiting long-poll loop");
-                // Give pending replies a moment to send before the server stops
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                // Await reply processor with 10s timeout
+                tokio::select! {
+                    _ = &mut reply_handle => {},
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                        tracing::warn!("reply processor did not finish within 10s, abandoning");
+                    }
+                }
                 break Ok(());
             }
             result = client.get_updates(&sync_buf, Some(35)) => {
@@ -227,24 +235,28 @@ async fn main() -> Result<()> {
                             let context_token = msg.context_token.unwrap_or_default();
                             let to_user = msg.from_user_id.unwrap_or_default();
 
-                            // Show typing indicator before command reply
-                            send_typing_indicator(&client, &current_token, &to_user, &typing_ticket_cache).await;
+                            with_typing(
+                                &typing_ticket_cache,
+                                &client,
+                                &current_token,
+                                &to_user,
+                                async {
+                                    let reply = crate::ilink::types::WeixinMessage::build_text_reply(
+                                        context_token,
+                                        to_user.clone(),
+                                        text,
+                                    );
+                                    let send_req = SendMessageRequest {
+                                        msg: reply,
+                                        base_info: None,
+                                    };
 
-                            let reply = crate::ilink::types::WeixinMessage::build_text_reply(
-                                context_token,
-                                to_user.clone(),
-                                text,
-                            );
-                            let send_req = SendMessageRequest {
-                                msg: reply,
-                                base_info: None,
-                            };
-
-                            if let Err(e) = client.send_message(&current_token, &send_req).await {
-                                tracing::warn!("send_message error: {e}");
-                            }
-
-                            stop_typing_indicator(&client, &current_token, &to_user, &typing_ticket_cache).await;
+                                    if let Err(e) = client.send_message(&current_token, &send_req).await {
+                                        tracing::warn!("send_message error: {e}");
+                                    }
+                                },
+                            )
+                            .await;
                         } else {
                             // Message was routed to agent queue — record context for reply lookup
                             if let Some(msg_id) = msg.message_id.map(|id| id.to_string()) {
@@ -263,19 +275,23 @@ async fn main() -> Result<()> {
                                 // Download media from CDN if present and update the queue entry
                                 if let Some(ref agent) = active_agent {
                                     if let Some(ref item_list) = msg.item_list {
-                                        let mut downloaded_media: Vec<MediaItem> = Vec::new();
-                                        for item in item_list {
-                                            match try_download_media(item, &msg_id, &cdn_base).await {
-                                                Some((local_path, media_type, original_name)) => {
-                                                    downloaded_media.push(MediaItem {
-                                                        media_type,
-                                                        local_path,
-                                                        original_name,
-                                                    });
-                                                }
-                                                None => {}
-                                            }
-                                        }
+                                        let download_futures: Vec<_> = item_list
+                                            .iter()
+                                            .map(|item| {
+                                                try_download_media(&http_client, item, &msg_id, &cdn_base)
+                                            })
+                                            .collect();
+                                        let results: Vec<_> =
+                                            futures::future::join_all(download_futures).await;
+                                        let downloaded_media: Vec<MediaItem> = results
+                                            .into_iter()
+                                            .filter_map(|r| r)
+                                            .map(|(local_path, media_type, original_name)| MediaItem {
+                                                media_type,
+                                                local_path,
+                                                original_name,
+                                            })
+                                            .collect();
                                         if !downloaded_media.is_empty() {
                                             router_arc.lock().unwrap().queue()
                                                 .update_last_media(agent, downloaded_media)
@@ -328,95 +344,168 @@ fn spawn_heartbeat_checker(router: Arc<Mutex<Router>>, check_interval_secs: u64,
     });
 }
 
-// ─── Typing indicator helpers ──────────────────────────────────────────────
+// ─── Typing ticket cache ──────────────────────────────────────────────
 
-/// Send a typing indicator before replying to a user.
+/// Typing ticket cache with TTL (~10 min = 600s) and TOCTOU prevention.
 ///
-/// 1. Look up a cached typing_ticket for this user.
-/// 2. If missing, fetch one via `client.get_config()`.
-/// 3. POST `sendtyping` with status=1.
-///
-/// Errors are silently ignored — typing is best-effort.
-async fn send_typing_indicator(
-    client: &IlinkClient,
-    token: &str,
-    user_id: &str,
-    ticket_cache: &Arc<Mutex<HashMap<String, String>>>,
-) {
-    let ticket = get_or_fetch_ticket(client, token, user_id, ticket_cache).await;
-    let Some(ticket) = ticket else {
-        return;
-    };
-
-    let req = crate::ilink::types::SendTypingRequest {
-        ilink_user_id: user_id.to_string(),
-        typing_ticket: ticket,
-        status: 1,
-        base_info: None,
-    };
-    let _ = client.send_typing(token, &req).await;
+/// Wraps `Arc<Mutex<HashMap<String, (String, Instant)>>>` to cache per-user
+/// typing tickets with expiration.  Concurrent `get_or_fetch` calls for the
+/// same `user_id` are serialized via an in-flight set so only one HTTP
+/// request is issued at a time.
+#[derive(Clone)]
+struct TypingTicketCache {
+    tickets: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    in_flight: Arc<Mutex<HashSet<String>>>,
 }
 
-/// Stop the typing indicator after sending a reply.
-///
-/// POST `sendtyping` with status=2 using the cached ticket.
-/// Errors are silently ignored.
-async fn stop_typing_indicator(
-    client: &IlinkClient,
-    token: &str,
-    user_id: &str,
-    ticket_cache: &Arc<Mutex<HashMap<String, String>>>,
-) {
-    let ticket = {
-        let cache = ticket_cache.lock().unwrap();
-        cache.get(user_id).cloned()
-    };
-    if let Some(ticket) = ticket {
+impl TypingTicketCache {
+    fn new() -> Self {
+        Self {
+            tickets: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Look up a cached ticket.  Returns `None` if missing or expired.
+    fn get(&self, user_id: &str) -> Option<String> {
+        let cache = self.tickets.lock().unwrap();
+        cache.get(user_id).and_then(|(ticket, created)| {
+            if created.elapsed() < Duration::from_secs(600) {
+                Some(ticket.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Insert a ticket, resetting its TTL.
+    fn insert(&self, user_id: &str, ticket: String) {
+        let mut cache = self.tickets.lock().unwrap();
+        cache.insert(user_id.to_string(), (ticket, Instant::now()));
+    }
+
+    /// Get a cached ticket, or fetch one from the server.
+    ///
+    /// If another task is already fetching a ticket for this `user_id`,
+    /// this call polls briefly rather than issuing a duplicate request.
+    async fn get_or_fetch(
+        &self,
+        client: &IlinkClient,
+        token: &str,
+        user_id: &str,
+    ) -> Option<String> {
+        // 1. Check cache first (fast path, no lock contention on in_flight).
+        if let Some(ticket) = self.get(user_id) {
+            return Some(ticket);
+        }
+
+        // 2. Try to claim the in-flight slot for this user_id.
+        let was_already_in_flight = {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if !in_flight.insert(user_id.to_string()) {
+                true
+            } else {
+                false
+            }
+        };
+
+        if was_already_in_flight {
+            // 2a. Another task is already fetching.  Poll until the ticket
+            //     appears in the cache or a reasonable timeout is reached.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some(ticket) = self.get(user_id) {
+                    return Some(ticket);
+                }
+            }
+            return None;
+        }
+
+        // 3. We hold the in-flight slot.  Fetch the ticket.
+        let result = self.fetch_and_cache(client, token, user_id).await;
+
+        // 4. Release the in-flight slot.
+        {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            in_flight.remove(user_id);
+        }
+
+        result
+    }
+
+    /// Fetch a typing ticket from the server, cache it, and return it.
+    async fn fetch_and_cache(
+        &self,
+        client: &IlinkClient,
+        token: &str,
+        user_id: &str,
+    ) -> Option<String> {
+        let req = crate::ilink::types::GetConfigRequest {
+            ilink_user_id: user_id.to_string(),
+            context_token: None,
+            base_info: None,
+        };
+        match client.get_config(token, &req).await {
+            Ok(resp) => {
+                if let Some(ticket) = resp.typing_ticket {
+                    self.insert(user_id, ticket.clone());
+                    Some(ticket)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Send a typing indicator (status=1) before replying.
+    async fn send_typing(&self, client: &IlinkClient, token: &str, user_id: &str) {
+        let ticket = self.get_or_fetch(client, token, user_id).await;
+        let Some(ticket) = ticket else {
+            return;
+        };
         let req = crate::ilink::types::SendTypingRequest {
             ilink_user_id: user_id.to_string(),
             typing_ticket: ticket,
-            status: 2,
+            status: 1,
             base_info: None,
         };
         let _ = client.send_typing(token, &req).await;
     }
+
+    /// Stop the typing indicator (status=2).  Fetches from cache only — no
+    /// server round-trip if the ticket expired or was never cached.
+    async fn stop_typing(&self, client: &IlinkClient, token: &str, user_id: &str) {
+        let ticket = {
+            let cache = self.tickets.lock().unwrap();
+            cache.get(user_id).map(|(t, _)| t.clone())
+        };
+        if let Some(ticket) = ticket {
+            let req = crate::ilink::types::SendTypingRequest {
+                ilink_user_id: user_id.to_string(),
+                typing_ticket: ticket,
+                status: 2,
+                base_info: None,
+            };
+            let _ = client.send_typing(token, &req).await;
+        }
+    }
 }
 
-/// Get a typing_ticket from cache, or fetch from the server and cache it.
-async fn get_or_fetch_ticket(
+/// Run some work wrapped in send-typing / stop-typing.
+async fn with_typing<T>(
+    cache: &TypingTicketCache,
     client: &IlinkClient,
     token: &str,
     user_id: &str,
-    ticket_cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> Option<String> {
-    // Check cache first
-    {
-        let cache = ticket_cache.lock().unwrap();
-        if let Some(ticket) = cache.get(user_id) {
-            return Some(ticket.clone());
-        }
-    }
-
-    // Fetch new ticket
-    let req = crate::ilink::types::GetConfigRequest {
-        ilink_user_id: user_id.to_string(),
-        context_token: None,
-        base_info: None,
-    };
-    match client.get_config(token, &req).await {
-        Ok(resp) => {
-            if let Some(ticket) = resp.typing_ticket {
-                ticket_cache.lock().unwrap().insert(user_id.to_string(), ticket.clone());
-                Some(ticket)
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    }
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    cache.send_typing(client, token, user_id).await;
+    let result = work.await;
+    cache.stop_typing(client, token, user_id).await;
+    result
 }
-
-// ─── Reply processor ──────────────────────────────────────────────────────
 
 /// Background task that processes agent replies from the channel.
 ///
@@ -428,7 +517,7 @@ async fn handle_agent_replies(
     token: String,
     _router: Arc<Mutex<Router>>,
     contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>>,
-    ticket_cache: Arc<Mutex<HashMap<String, String>>>,
+    ticket_cache: TypingTicketCache,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentReply>,
 ) {
     while let Some(reply) = rx.recv().await {
@@ -448,62 +537,62 @@ async fn handle_agent_replies(
 
         if reply.media_paths.is_empty() {
             // Text-only reply
-            send_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
-            let reply_msg =
-                WeixinMessage::build_text_reply(context_token, to_user.clone(), reply.text);
-            let req = SendMessageRequest {
-                msg: reply_msg,
-                base_info: None,
-            };
-            if let Err(e) = client.send_message(&token, &req).await {
-                tracing::error!("failed to send text reply: {e}");
-            }
-            stop_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
+            with_typing(&ticket_cache, &client, &token, &to_user, async {
+                let reply_msg =
+                    WeixinMessage::build_text_reply(context_token, to_user.clone(), reply.text);
+                let req = SendMessageRequest {
+                    msg: reply_msg,
+                    base_info: None,
+                };
+                if let Err(e) = client.send_message(&token, &req).await {
+                    tracing::error!("failed to send text reply: {e}");
+                }
+            })
+            .await;
         } else {
             // Media reply — encrypt and upload each file, then send
             use crate::ilink::media::process_media_upload;
 
-            send_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
-
-            // Process the first media file
-            let first_path = &reply.media_paths[0];
-            match process_media_upload(&client, &token, first_path).await {
-                Ok((item_type, encrypt_query_param, aes_key)) => {
-                    let reply_msg = WeixinMessage::build_media_reply(
-                        context_token.clone(),
-                        to_user.clone(),
-                        reply.text.clone(),
-                        item_type,
-                        encrypt_query_param,
-                        aes_key,
-                    );
-                    let req = SendMessageRequest {
-                        msg: reply_msg,
-                        base_info: None,
-                    };
-                    if let Err(e) = client.send_message(&token, &req).await {
-                        tracing::error!("failed to send media reply: {e}");
+            with_typing(&ticket_cache, &client, &token, &to_user, async {
+                // Process the first media file
+                let first_path = &reply.media_paths[0];
+                match process_media_upload(&client, &token, first_path).await {
+                    Ok((item_type, encrypt_query_param, aes_key)) => {
+                        let reply_msg = WeixinMessage::build_media_reply(
+                            context_token.clone(),
+                            to_user.clone(),
+                            reply.text.clone(),
+                            item_type,
+                            encrypt_query_param,
+                            aes_key,
+                        );
+                        let req = SendMessageRequest {
+                            msg: reply_msg,
+                            base_info: None,
+                        };
+                        if let Err(e) = client.send_message(&token, &req).await {
+                            tracing::error!("failed to send media reply: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to process media upload: {e}");
+                        // Fallback: send text with error
+                        let reply_msg = WeixinMessage::build_text_reply(
+                            context_token.clone(),
+                            to_user.clone(),
+                            format!("Media processing failed: {e}"),
+                        );
+                        let req = SendMessageRequest {
+                            msg: reply_msg,
+                            base_info: None,
+                        };
+                        if let Err(e2) = client.send_message(&token, &req).await {
+                            tracing::error!("failed to send fallback message: {e2}");
+                        }
                     }
                 }
-                Err(e) => {
-                    tracing::error!("failed to process media upload: {e}");
-                    // Fallback: send text with error
-                    let reply_msg = WeixinMessage::build_text_reply(
-                        context_token.clone(),
-                        to_user.clone(),
-                        format!("Media processing failed: {e}"),
-                    );
-                    let req = SendMessageRequest {
-                        msg: reply_msg,
-                        base_info: None,
-                    };
-                    if let Err(e2) = client.send_message(&token, &req).await {
-                        tracing::error!("failed to send fallback message: {e2}");
-                    }
-                }
-            }
-
-            stop_typing_indicator(&client, &token, &to_user, &ticket_cache).await;
+            })
+            .await;
 
             // Acknowledge additional files as text
             for extra_path in &reply.media_paths[1..] {
@@ -677,6 +766,7 @@ use crate::ilink::types::MessageItem;
 /// `None` if the item is not a downloadable media type or required fields
 /// are missing.
 async fn try_download_media(
+    http_client: &reqwest::Client,
     item: &MessageItem,
     msg_id: &str,
     cdn_base: &str,
@@ -726,12 +816,11 @@ async fn try_download_media(
     let mut aes_key = [0u8; 16];
     aes_key.copy_from_slice(&aes_bytes);
 
-    let http_client = reqwest::Client::new();
     let cache_dir = "/tmp/wechat-gateway-media";
     let file_name = format!("{msg_id}-{media_type_name}");
 
     let local_path = crate::ilink::download::download_media(
-        &http_client,
+        http_client,
         cdn_base,
         &encrypt_query_param,
         &aes_key,
@@ -768,11 +857,11 @@ mod tests {
 
     #[test]
     fn test_cdn_base_url_trimmed_c2c_produces_download_base() {
-        let cfg = GatewayConfig::default();
-        let trimmed = cfg.cdn_base_url.trim_end_matches("/c2c");
-        assert_eq!(trimmed, "https://novac2c.cdn.weixin.qq.com");
+        use crate::ilink::types::ILINK_CDN_BASE_URL;
 
-        // Verify that build_cdn_download_url works correctly with the trimmed value
+        let cfg = GatewayConfig::default();
+        let trimmed = cfg.cdn_base_url.strip_suffix("/c2c").unwrap_or(&cfg.cdn_base_url);
+        assert_eq!(trimmed, ILINK_CDN_BASE_URL.strip_suffix("/c2c").unwrap_or(ILINK_CDN_BASE_URL));
         let url = crate::ilink::media::build_cdn_download_url(trimmed, "encrypted_param");
         assert_eq!(
             url,
@@ -1211,7 +1300,7 @@ mod tests {
             AgentRegistry::new(),
             MessageQueue::new(),
         )));
-        let tickets: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tickets = TypingTicketCache::new();
         tokio::spawn(async move {
             handle_agent_replies(
                 client,
@@ -1297,7 +1386,7 @@ mod tests {
             AgentRegistry::new(),
             MessageQueue::new(),
         )));
-        let tickets: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tickets = TypingTicketCache::new();
 
         tokio::spawn(async move {
             handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, tickets, &mut rx)
@@ -1320,13 +1409,13 @@ mod tests {
         send_mock.assert();
     }
 
-    // ─── Typing indicator tests ───────────────────────────────────────────
+    // ─── TypingTicketCache tests ──────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_send_typing_indicator_calls_get_config_and_send_typing() {
+    async fn test_typing_cache_get_or_fetch_calls_get_config() {
         let mut server = mockito::Server::new_async().await;
         let client = IlinkClient::new(Some(server.url())).unwrap();
-        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cache = TypingTicketCache::new();
 
         // Mock getconfig — typing ticket response
         let config_mock = server
@@ -1341,7 +1430,53 @@ mod tests {
             }).to_string())
             .create();
 
-        // Mock sendtyping — start typing
+        let ticket = cache.get_or_fetch(&client, "test-token", "user@wx").await;
+        assert_eq!(ticket, Some("ticket-abc".to_string()));
+        config_mock.assert();
+
+        // Should be cached
+        assert_eq!(cache.get("user@wx"), Some("ticket-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_typing_cache_reuses_cached_ticket() {
+        let cache = TypingTicketCache::new();
+        cache.insert("user@wx", "cached-ticket".to_string());
+
+        // No server needed — cache hit doesn't make HTTP calls
+        let client = IlinkClient::new(Some("http://localhost:1".to_string())).unwrap();
+        let ticket = cache.get_or_fetch(&client, "token", "user@wx").await;
+        assert_eq!(ticket, Some("cached-ticket".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_typing_cache_insert_and_get() {
+        let cache = TypingTicketCache::new();
+        assert_eq!(cache.get("user@wx"), None);
+
+        cache.insert("user@wx", "ticket-abc".to_string());
+        assert_eq!(cache.get("user@wx"), Some("ticket-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_typing_cache_get_expired_returns_none() {
+        let cache = TypingTicketCache::new();
+        cache.tickets.lock().unwrap().insert(
+            "user@wx".to_string(),
+            ("expired-ticket".to_string(), Instant::now() - Duration::from_secs(601)),
+        );
+        assert_eq!(cache.get("user@wx"), None);
+    }
+
+    #[tokio::test]
+    async fn test_typing_cache_send_typing_calls_sendtyping() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+        let cache = TypingTicketCache::new();
+
+        // Pre-populate cache so no getconfig is called
+        cache.insert("user@wx", "ticket-abc".to_string());
+
         let typing_mock = server
             .mock("POST", "/ilink/bot/sendtyping")
             .match_header("authorization", "Bearer test-token")
@@ -1357,55 +1492,17 @@ mod tests {
             .with_body(serde_json::json!({"ret": 0}).to_string())
             .create();
 
-        send_typing_indicator(&client, "test-token", "user@wx", &cache).await;
-
-        config_mock.assert();
-        typing_mock.assert();
-
-        // Ticket should be cached
-        let cached = cache.lock().unwrap();
-        assert_eq!(cached.get("user@wx").unwrap(), "ticket-abc");
-    }
-
-    #[tokio::test]
-    async fn test_send_typing_indicator_reuses_cached_ticket() {
-        let mut server = mockito::Server::new_async().await;
-        let client = IlinkClient::new(Some(server.url())).unwrap();
-        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-
-        // Pre-populate cache
-        cache.lock().unwrap().insert("user@wx".to_string(), "cached-ticket".to_string());
-
-        // Only mock sendtyping — getconfig should NOT be called
-        let typing_mock = server
-            .mock("POST", "/ilink/bot/sendtyping")
-            .match_header("authorization", "Bearer test-token")
-            .match_body(mockito::Matcher::JsonString(
-                serde_json::json!({
-                    "ilink_user_id": "user@wx",
-                    "typing_ticket": "cached-ticket",
-                    "status": 1
-                }).to_string(),
-            ))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(serde_json::json!({"ret": 0}).to_string())
-            .create();
-
-        // No getconfig mock — test will fail if getconfig is called
-        send_typing_indicator(&client, "test-token", "user@wx", &cache).await;
-
+        cache.send_typing(&client, "test-token", "user@wx").await;
         typing_mock.assert();
     }
 
     #[tokio::test]
-    async fn test_stop_typing_indicator_sends_status_2() {
+    async fn test_typing_cache_stop_typing_sends_status_2() {
         let mut server = mockito::Server::new_async().await;
         let client = IlinkClient::new(Some(server.url())).unwrap();
-        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cache = TypingTicketCache::new();
 
-        // Pre-populate cache
-        cache.lock().unwrap().insert("user@wx".to_string(), "ticket-abc".to_string());
+        cache.insert("user@wx", "ticket-abc".to_string());
 
         let typing_mock = server
             .mock("POST", "/ilink/bot/sendtyping")
@@ -1422,16 +1519,15 @@ mod tests {
             .with_body(serde_json::json!({"ret": 0}).to_string())
             .create();
 
-        stop_typing_indicator(&client, "test-token", "user@wx", &cache).await;
-
+        cache.stop_typing(&client, "test-token", "user@wx").await;
         typing_mock.assert();
     }
 
     #[tokio::test]
-    async fn test_typing_indicator_error_does_not_block() {
+    async fn test_typing_cache_error_does_not_block() {
         let mut server = mockito::Server::new_async().await;
         let client = IlinkClient::new(Some(server.url())).unwrap();
-        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cache = TypingTicketCache::new();
 
         // Mock getconfig that will fail
         let config_mock = server
@@ -1440,24 +1536,61 @@ mod tests {
             .create();
 
         // Should not panic or error out
-        send_typing_indicator(&client, "test-token", "user@wx", &cache).await;
+        cache.send_typing(&client, "test-token", "user@wx").await;
 
         config_mock.assert();
 
         // Cache should still be empty
-        let cached = cache.lock().unwrap();
-        assert!(cached.get("user@wx").is_none());
+        assert!(cache.get("user@wx").is_none());
     }
 
     #[tokio::test]
-    async fn test_get_or_fetch_ticket_returns_cached() {
-        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-        cache.lock().unwrap().insert("user@wx".to_string(), "cached-ticket".to_string());
+    async fn test_with_typing_wraps_work() {
+        let mut server = mockito::Server::new_async().await;
+        let client = IlinkClient::new(Some(server.url())).unwrap();
+        let cache = TypingTicketCache::new();
 
-        // No server needed — cache hit doesn't make HTTP calls
-        let client = IlinkClient::new(Some("http://localhost:1".to_string())).unwrap();
-        let ticket = get_or_fetch_ticket(&client, "token", "user@wx", &cache).await;
-        assert_eq!(ticket, Some("cached-ticket".to_string()));
+        cache.insert("user@wx", "ticket-abc".to_string());
+
+        // Mock sendtyping status=1
+        let send_typing_mock = server
+            .mock("POST", "/ilink/bot/sendtyping")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(mockito::Matcher::JsonString(
+                serde_json::json!({
+                    "ilink_user_id": "user@wx",
+                    "typing_ticket": "ticket-abc",
+                    "status": 1
+                }).to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        // Mock sendtyping status=2
+        let stop_typing_mock = server
+            .mock("POST", "/ilink/bot/sendtyping")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(mockito::Matcher::JsonString(
+                serde_json::json!({
+                    "ilink_user_id": "user@wx",
+                    "typing_ticket": "ticket-abc",
+                    "status": 2
+                }).to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({"ret": 0}).to_string())
+            .create();
+
+        let result = with_typing(&cache, &client, "test-token", "user@wx", async {
+            42
+        }).await;
+
+        assert_eq!(result, 42);
+        send_typing_mock.assert();
+        stop_typing_mock.assert();
     }
 
     // ─── Helper ───────────────────────────────────────────────────────────
