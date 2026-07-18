@@ -40,10 +40,13 @@ pub struct ReplyRequest {
     pub text: String,
     #[serde(default)]
     pub media_paths: Vec<String>,
+    /// Optional target user for proactive sends (pairing codes, etc.).
+    /// When set, bypasses message_context lookup.
     #[serde(default)]
-    pub acp_session_id: Option<String>,
+    pub to_user: Option<String>,
+    /// Optional context_token for proactive sends.
     #[serde(default)]
-    pub acp_from_user: Option<String>,
+    pub context_token: Option<String>,
 }
 
 // ─── Application state ──────────────────────────────────────────────────────
@@ -160,7 +163,6 @@ pub async fn handle_poll(
     let agent_msgs: Vec<serde_json::Value> = messages
         .into_iter()
         .map(|m| {
-            let session_id = router.get_session(&name, &m.from_user);
             let media: Vec<serde_json::Value> = m
                 .media
                 .into_iter()
@@ -179,7 +181,6 @@ pub async fn handle_poll(
                 "timestamp": m.timestamp,
                 "context_token": m.context_token,
                 "message_type": m.message_type,
-                "session_id": session_id,
                 "media": media,
             })
         })
@@ -197,24 +198,16 @@ pub async fn handle_poll(
 /// when the iLink client is available.
 pub async fn handle_reply(
     State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
+    Path(_name): Path<String>,
     Json(body): Json<ReplyRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Store ACP session info if provided
-    if let (Some(session_id), Some(from_user)) = (body.acp_session_id, body.acp_from_user)
-    {
-        let mut router = state.router.lock().unwrap();
-        router.set_session(&name, &from_user, session_id);
-        if let Ok(store) = state.store.lock() {
-            router.persist_state(&store);
-        }
-    }
-
     // Send reply through channel
     let reply = AgentReply {
         reply_to_id: body.reply_to_id,
         text: body.text,
         media_paths: body.media_paths,
+        to_user: body.to_user,
+        context_token: body.context_token,
     };
     if state.reply_tx.send(reply).is_err() {
         tracing::warn!("reply channel closed, dropping reply");

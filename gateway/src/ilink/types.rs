@@ -501,12 +501,24 @@ pub struct AgentMessage {
 }
 
 /// An agent's reply to a WeChat message.
+///
+/// For normal replies, `reply_to_id` is used to look up the context_token
+/// and to_user from the incoming message context. For proactive sends
+/// (pairing codes, notifications), set `to_user` (and optionally
+/// `context_token`) directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentReply {
     pub reply_to_id: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_paths: Vec<String>,
+    /// When set, bypass the message_context lookup and send to this user
+    /// instead (used for proactive sends like pairing codes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_user: Option<String>,
+    /// Optional context_token for proactive sends. Defaults to "" if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_token: Option<String>,
 }
 
 /// Status of a registered agent.
@@ -663,10 +675,14 @@ mod tests {
             reply_to_id: "msg-1".to_string(),
             text: "hello back".to_string(),
             media_paths: vec![],
+            to_user: None,
+            context_token: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         let deserialized: AgentReply = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.reply_to_id, "msg-1");
+        assert!(deserialized.to_user.is_none());
+        assert!(deserialized.context_token.is_none());
     }
 
     #[test]
@@ -714,6 +730,8 @@ mod tests {
             reply_to_id: "msg-1".to_string(),
             text: "here is a file".to_string(),
             media_paths: vec!["/tmp/file.pdf".to_string()],
+            to_user: None,
+            context_token: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(json.contains("media_paths"));
@@ -728,9 +746,28 @@ mod tests {
             reply_to_id: "msg-1".to_string(),
             text: "hello".to_string(),
             media_paths: vec![],
+            to_user: None,
+            context_token: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(!json.contains("media_paths"));
+    }
+
+    #[test]
+    fn test_agent_reply_proactive_send_roundtrip() {
+        let reply = AgentReply {
+            reply_to_id: String::new(),
+            text: "配对码: 12345678".to_string(),
+            media_paths: vec![],
+            to_user: Some("wx_user_id".to_string()),
+            context_token: Some(String::new()),
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains("to_user"));
+        assert!(json.contains("context_token"));
+        let deserialized: AgentReply = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.to_user.as_deref(), Some("wx_user_id"));
+        assert!(deserialized.context_token.is_some());
     }
 
     #[test]

@@ -2159,25 +2159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wechat-gateway-client-hermes"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "mockito",
- "rand 0.9.5",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

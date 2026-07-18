@@ -48,6 +48,13 @@ mod storage;
 struct MessageContextInfo {
     context_token: String,
     to_user: String,
+    /// Timestamp (Instant) when the incoming message was received, for
+    /// measuring agent response time. Logged when the reply is sent.
+    received_at: Instant,
+    /// Truncated text of the incoming message, for audit logging.
+    message_preview: String,
+    /// Name of the agent the message was routed to.
+    agent_name: String,
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -229,6 +236,10 @@ async fn main() -> Result<()> {
                 };
 
                 if let Some(text) = reply_text {
+                    tracing::info!(
+                        agent = %active_agent.as_deref().unwrap_or("-"),
+                        "handled inline (command)",
+                    );
                     let context_token = msg.context_token.unwrap_or_default();
                     let to_user = msg.from_user_id.unwrap_or_default();
 
@@ -263,14 +274,26 @@ async fn main() -> Result<()> {
                         if let (Some(ctx), Some(user)) =
                             (msg.context_token.clone(), msg.from_user_id.clone())
                         {
+                            let agent = active_agent.clone().unwrap_or_default();
+                            let preview = msg.text().unwrap_or("").chars().take(80).collect::<String>();
                             message_contexts.lock().unwrap().insert(
                                 msg_id.clone(),
                                 MessageContextInfo {
                                     context_token: ctx,
-                                    to_user: user,
+                                    to_user: user.clone(),
+                                    received_at: Instant::now(),
+                                    message_preview: preview.clone(),
+                                    agent_name: agent.clone(),
                                 },
                             );
-                        }
+                            tracing::info!(
+                                agent = %agent,
+                                from_user = %user,
+                                msg_id = %msg_id,
+                                msg_preview = %preview,
+                                "routed message to agent {agent}: {preview}",
+                            );
+                        }   // ← close if let (Some(ctx), Some(user))
 
                         // Download media from CDN if present and update the queue entry
                         if let Some(ref agent) = active_agent {
@@ -678,19 +701,48 @@ async fn handle_agent_replies(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentReply>,
 ) {
     while let Some(reply) = rx.recv().await {
-        // Look up context by reply_to_id
-        let ctx_info = {
-            let map = contexts.lock().unwrap();
-            map.get(&reply.reply_to_id).cloned()
-        };
+        // Proactive send: when to_user is set directly, bypass context lookup
+        let (context_token, to_user, ctx_start, _ctx_preview, ctx_agent) =
+            if let Some(ref to) = reply.to_user {
+                let ctx = reply.context_token.clone().unwrap_or_default();
+                (ctx, to.clone(), None, String::new(), String::new())
+            } else {
+                // Look up context by reply_to_id
+                let mut map = contexts.lock().unwrap();
+                match map.remove(&reply.reply_to_id) {
+                    Some(info) => (
+                        info.context_token,
+                        info.to_user,
+                        Some(info.received_at),
+                        info.message_preview,
+                        info.agent_name,
+                    ),
+                    None => {
+                        tracing::warn!("no context found for reply_to_id={}", reply.reply_to_id,);
+                        continue;
+                    }
+                }
+            };
 
-        let (context_token, to_user) = match ctx_info {
-            Some(info) => (info.context_token, info.to_user),
-            None => {
-                tracing::warn!("no context found for reply_to_id={}", reply.reply_to_id);
-                continue;
-            }
-        };
+        // Log agent response
+        let elapsed = ctx_start
+            .map(|t| t.elapsed())
+            .map(|d| format!("{:.2}s", d.as_secs_f64()))
+            .unwrap_or_else(|| String::new());
+        if !ctx_agent.is_empty() {
+            tracing::info!(
+                agent = %ctx_agent,
+                to_user = %to_user,
+                reply_to = %reply.reply_to_id,
+                response_time = %elapsed,
+                "agent {ctx_agent} responded in {elapsed}",
+            );
+        } else {
+            tracing::info!(
+                to_user = %to_user,
+                "proactive send to {to_user}",
+            );
+        }
 
         if reply.media_paths.is_empty() {
             // Text-only reply
@@ -769,9 +821,6 @@ async fn handle_agent_replies(
                 }
             }
         }
-
-        // Clean up context entry
-        contexts.lock().unwrap().remove(&reply.reply_to_id);
     }
 }
 
@@ -1437,6 +1486,9 @@ mod tests {
                     MessageContextInfo {
                         context_token: ctx,
                         to_user: user,
+                        received_at: Instant::now(),
+                        message_preview: "agent message".to_string(),
+                        agent_name: "hermes".to_string(),
                     },
                 );
             }
@@ -1448,6 +1500,7 @@ mod tests {
             .expect("context should be recorded for message_id 100");
         assert_eq!(info.context_token, "ctx-reply-789");
         assert_eq!(info.to_user, "user@wx");
+        assert_eq!(info.agent_name, "hermes");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1472,6 +1525,9 @@ mod tests {
             MessageContextInfo {
                 context_token: "ctx-999".to_string(),
                 to_user: "user@wx".to_string(),
+                received_at: Instant::now(),
+                message_preview: "test".to_string(),
+                agent_name: "hermes".to_string(),
             },
         );
 
@@ -1508,6 +1564,8 @@ mod tests {
             reply_to_id: "msg-42".to_string(),
             text: "Hello from agent".to_string(),
             media_paths: vec![],
+            to_user: None,
+            context_token: None,
         })
         .unwrap();
 
@@ -1565,6 +1623,9 @@ mod tests {
             MessageContextInfo {
                 context_token: "ctx-555".to_string(),
                 to_user: "user@wx".to_string(),
+                received_at: Instant::now(),
+                message_preview: "test".to_string(),
+                agent_name: "hermes".to_string(),
             },
         );
 
@@ -1591,6 +1652,8 @@ mod tests {
             reply_to_id: "msg-99".to_string(),
             text: "Check this image".to_string(),
             media_paths: vec![media_path.to_string_lossy().to_string()],
+            to_user: None,
+            context_token: None,
         })
         .unwrap();
 

@@ -92,6 +92,14 @@ async fn handle_socket(socket: WebSocket, name: String, state: Arc<AppState>) {
                                         .collect()
                                 })
                                 .unwrap_or_default(),
+                            to_user: reply
+                                .get("to_user")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            context_token: reply
+                                .get("context_token")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
                         };
                         // Forward the reply through the existing reply channel
                         let _ = state.reply_tx.send(agent_reply);

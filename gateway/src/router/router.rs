@@ -5,7 +5,7 @@
 //! handles built-in commands (/use, /list, /status, /cmd),
 //! and dispatches agent replies back to iLink.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::agents::queue::MessageQueue;
 use crate::agents::registry::AgentRegistry;
@@ -20,21 +20,12 @@ use crate::storage::sqlite_store::SqliteStore;
 /// State keys used in the gateway_state table.
 const KEY_ACTIVE_AGENT: &str = "active_agent";
 
-/// Persist all agent_sessions for a given agent as one JSON blob under
-/// "session:{agent_name}".
-fn sessions_key(agent: &str) -> String {
-    format!("sessions:{}", agent)
-}
-
 /// Central message router that coordinates message handling.
 pub struct Router {
     registry: AgentRegistry,
     queue: MessageQueue,
     active_agent: Option<String>,
     cmd_max_output_chars: usize,
-    /// Per-agent per-user ACP session IDs.
-    /// Key: agent_name → (from_user → acp_session_id)
-    agent_sessions: HashMap<String, HashMap<String, String>>,
     /// DM admission policy.
     dm_policy: DmPolicy,
     /// Group admission policy.
@@ -53,7 +44,6 @@ impl Router {
             queue,
             active_agent: None,
             cmd_max_output_chars: 2000,
-            agent_sessions: HashMap::new(),
             dm_policy: DmPolicy::Open,
             group_policy: GroupPolicy::Disabled,
             allowed_users: HashSet::new(),
@@ -96,72 +86,30 @@ impl Router {
 
     /// Load persisted state from the SQLite store.
     ///
-    /// Restores active_agent and all agent session mappings.
+    /// Restores active_agent.
     pub fn load_state(&mut self, store: &SqliteStore) {
         // Restore active agent (may reference an agent not yet registered)
         if let Ok(Some(agent)) = store.get_state(KEY_ACTIVE_AGENT) {
             self.active_agent = Some(agent);
         }
-
-        // Restore all persisted session mappings (keys look like "sessions:*")
-        // Walk all gateway_state keys to find session entries.
-        if let Ok(keys) = store.get_state_keys_with_prefix("sessions:") {
-            for key in keys {
-                if let Some(agent_name) = key.strip_prefix("sessions:") {
-                    if let Ok(Some(json)) = store.get_state(&key) {
-                        if let Ok(sessions) =
-                            serde_json::from_str::<HashMap<String, String>>(&json)
-                        {
-                            self.agent_sessions
-                                .insert(agent_name.to_string(), sessions);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Persist current state to the SQLite store.
     ///
-    /// Saves active_agent and all agent session mappings.
+    /// Saves active_agent.
     pub fn persist_state(&self, store: &SqliteStore) {
         // Save active agent
         if let Some(ref agent) = self.active_agent {
             let _ = store.set_state(KEY_ACTIVE_AGENT, agent);
         }
-
-        // Save session mappings for all agents
-        for (agent_name, sessions) in &self.agent_sessions {
-            let key = sessions_key(agent_name);
-            if let Ok(json) = serde_json::to_string(sessions) {
-                let _ = store.set_state(&key, &json);
-            }
-        }
     }
 
-    /// Get the cached ACP session ID for an agent's user conversation.
-    pub fn get_session(&self, agent: &str, from_user: &str) -> Option<&str> {
-        self.agent_sessions
-            .get(agent)?
-            .get(from_user)
-            .map(|s| s.as_str())
-    }
-
-    /// Set or update the ACP session ID for an agent's user conversation.
-    pub fn set_session(&mut self, agent: &str, from_user: &str, session_id: String) {
-        self.agent_sessions
-            .entry(agent.to_string())
-            .or_default()
-            .insert(from_user.to_string(), session_id);
-    }
-
-    /// Set the maximum number of characters for `/cmd` command output.
-    pub fn set_cmd_max_output_chars(&mut self, max: usize) {
-        self.cmd_max_output_chars = max;
+    /// Get the name of the active agent.
+    pub fn active_agent(&self) -> Option<&str> {
+        self.active_agent.as_deref()
     }
 
     /// Set the active agent. Returns error if agent not registered.
-    #[allow(dead_code)]
     pub fn set_active_agent(&mut self, name: &str) -> Result<()> {
         if !self.registry.contains(name) {
             return Err(GatewayError::AgentNotFound(name.to_string()));
@@ -170,9 +118,9 @@ impl Router {
         Ok(())
     }
 
-    /// Get the name of the active agent.
-    pub fn active_agent(&self) -> Option<&str> {
-        self.active_agent.as_deref()
+    /// Set the maximum number of characters for `/cmd` command output.
+    pub fn set_cmd_max_output_chars(&mut self, max: usize) {
+        self.cmd_max_output_chars = max;
     }
 
     /// Process an incoming WeChat message.

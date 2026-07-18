@@ -151,25 +151,6 @@ impl SqliteStore {
             .map_err(|e| GatewayError::Storage(format!("Failed to delete state '{}': {}", key, e)))?;
         Ok(())
     }
-
-    /// Get all state keys matching a given prefix.
-    pub fn get_state_keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key FROM gateway_state WHERE key LIKE ?1")
-            .map_err(|e| GatewayError::Storage(format!("Failed to prepare keys query: {e}")))?;
-        let pattern = format!("{}%", prefix);
-        let rows = stmt
-            .query_map(rusqlite::params![pattern], |row| row.get(0))
-            .map_err(|e| GatewayError::Storage(format!("Failed to query state keys: {e}")))?;
-        let mut keys = Vec::new();
-        for row in rows {
-            keys.push(row.map_err(|e| {
-                GatewayError::Storage(format!("Failed to read state key: {e}"))
-            })?);
-        }
-        Ok(keys)
-    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

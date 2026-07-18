@@ -1,0 +1,22 @@
+name: wechat-gateway
+label: WeChat Gateway
+kind: platform
+version: 1.0.0
+description: >
+  Connect Hermes Agent to WeChat via Hanelalo's wechat-gateway (Rust).
+  Polls the gateway REST API for messages and sends replies through it.
+author: hanelalo
+requires_env:
+  - name: WECHAT_GATEWAY_URL
+    description: "wechat-gateway HTTP API URL (e.g. http://127.0.0.1:8765)"
+    prompt: "Gateway URL"
+    url: ""
+    password: false
+  - name: WECHAT_GATEWAY_AGENT_NAME
+    description: "Agent name to register with the gateway (default: hermes)"
+    prompt: "Agent name"
+    password: false
+optional_env:
+  - name: WECHAT_GATEWAY_POLL_INTERVAL
+    description: "Poll interval in seconds (default: 1)"
+    password: false
