@@ -305,7 +305,7 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         """Prepend **<agent_name>** header if not already present."""
         if text.startswith("**"):
             return text
-        return f"**{self.agent_name}**\n\n{text}"
+        return f"**{self.agent_name}**\n---\n{text}"
 
     async def _register(self) -> bool:
         """POST /api/agents/register with this agent's name."""

@@ -49,7 +49,7 @@ function getSdkVersion(): string {
  * Build a reply header with the Claude workspace prefix.
  */
 function formatReplyHeader(basename: string): string {
-  return `**claude**:${basename}`;
+  return `**claude**:${basename}\n---`;
 }
 
 export async function start(): Promise<void> {
