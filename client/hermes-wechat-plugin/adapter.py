@@ -508,6 +508,7 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
                 "reply_to_id": reply_to_id,
                 "text": content,
                 "media_paths": [],
+                "agent_context": json.dumps({"agent": self.agent_name}),
             }
             try:
                 async with self._session.post(url, json=body) as resp:
