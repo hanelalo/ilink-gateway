@@ -40,6 +40,7 @@ DEFAULT_POLL_INTERVAL = 1.0  # seconds
 CONTENT_MAX_LENGTH = 2000
 SEGMENT_DELAY = 1.5  # seconds between segments
 _FENCE_RE = re.compile(r"^```")
+_TABLE_ROW_RE = re.compile(r"^\s*\|")
 
 
 def _str_env(name: str, default: str = "") -> str:
@@ -101,6 +102,7 @@ def _split_markdown_blocks(text: str) -> list[str]:
     """Split text at blank lines and code fence boundaries.
 
     Code blocks are kept intact as single units.
+    Consecutive table rows (lines starting with ``|``) are kept as single units.
     """
     if not text:
         return []
@@ -108,33 +110,54 @@ def _split_markdown_blocks(text: str) -> list[str]:
     lines = text.splitlines()
     current: list[str] = []
     in_code_block = False
+    in_table = False
+
+    def _flush() -> None:
+        if current:
+            blocks.append("\n".join(current).strip())
+            current.clear()
 
     for raw_line in lines:
         line = raw_line.rstrip()
+
+        # Code fence toggles
         if _FENCE_RE.match(line.strip()):
-            if not in_code_block and current:
-                blocks.append("\n".join(current).strip())
-                current = []
+            if not in_code_block:
+                _flush()
+                in_table = False
             current.append(line)
             in_code_block = not in_code_block
             if not in_code_block:
-                blocks.append("\n".join(current).strip())
-                current = []
+                _flush()
             continue
 
         if in_code_block:
             current.append(line)
             continue
 
+        # Blank line = block boundary
         if not line.strip():
-            if current:
-                blocks.append("\n".join(current).strip())
-                current = []
+            in_table = False
+            _flush()
             continue
+
+        # Table row: keep consecutive | lines together
+        if _TABLE_ROW_RE.match(line.strip()):
+            if not in_table:
+                _flush()
+                in_table = True
+            current.append(line)
+            continue
+
+        # Exiting table
+        if in_table:
+            _flush()
+            in_table = False
+
+        # Regular text
         current.append(line)
 
-    if current:
-        blocks.append("\n".join(current).strip())
+    _flush()
     return [b for b in blocks if b]
 
 
@@ -519,7 +542,7 @@ def register(ctx):
         env_enablement_fn=_env_enablement,
         allowed_users_env="WECHAT_GATEWAY_ALLOWED_USERS",
         allow_all_env="WECHAT_GATEWAY_ALLOW_ALL_USERS",
-        max_message_length=4000,
+        max_message_length=2000,
         platform_hint=(
             "You are chatting via WeChat. "
             "You can respond with formatted text."

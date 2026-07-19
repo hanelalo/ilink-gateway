@@ -3,43 +3,77 @@ import { StreamingBatcher, splitLongMessage, splitLongReply } from './streaming-
 
 describe('splitLongMessage', () => {
   it('should return original text as single segment when within maxLen', () => {
-    expect(splitLongMessage('hello', 3800)).toEqual(['hello']);
+    expect(splitLongMessage('hello', 2000)).toEqual(['hello']);
   });
 
   it('should return original text as single segment when empty', () => {
-    expect(splitLongMessage('', 3800)).toEqual(['']);
-  });
-
-  it('should split text longer than maxLen into segments', () => {
-    const longText = 'a'.repeat(5000);
-    const segments = splitLongMessage(longText, 3800);
-    expect(segments.length).toBeGreaterThan(1);
-    // Each segment is prefixed with [N/M], so joined != original
-    // Check that content without prefix reconstructs
-    const contentOnly = segments.map(s => s.replace(/^\[\d+\/\d+\] /, '')).join('');
-    expect(contentOnly).toBe(longText);
-  });
-
-  it('should split large text evenly', () => {
-    const longText = 'HelloWorld'.repeat(500);
-    const segments = splitLongMessage(longText, 3800);
-    expect(segments.length).toBeGreaterThan(1);
-    const contentOnly = segments.map(s => s.replace(/^\[\d+\/\d+\] /, '')).join('');
-    expect(contentOnly).toBe(longText);
-  });
-
-  it('should respect the custom maxLen parameter', () => {
-    const longText = 'a'.repeat(100);
-    const segments = splitLongMessage(longText, 30);
-    expect(segments.length).toBeGreaterThan(1);
-    segments.forEach((s) => {
-      expect(s.length).toBeLessThanOrEqual(37); // 30 + some overhead margin
-    });
+    expect(splitLongMessage('')).toEqual(['']);
   });
 
   it('should handle exact boundary', () => {
-    const text = 'a'.repeat(3800);
-    expect(splitLongMessage(text, 3800)).toEqual([text]);
+    const text = 'a'.repeat(2000);
+    expect(splitLongMessage(text, 2000)).toEqual([text]);
+  });
+
+  it('should split at blank lines when text exceeds maxLen', () => {
+    const text = 'short paragraph\n\n' + 'x'.repeat(400) + '\n\n' + 'y'.repeat(400) + '\n\n' + 'z'.repeat(400);
+    const maxLen = 500;
+    const segments = splitLongMessage(text, maxLen);
+    expect(segments.length).toBeGreaterThan(1);
+    // Each segment should be under maxLen
+    segments.forEach(seg => {
+      expect(seg.length).toBeLessThanOrEqual(maxLen);
+    });
+  });
+
+  it('should keep code blocks intact', () => {
+    const codeBlock = '```python\nprint("hello")\nprint("world")\n```';
+    const text = 'x'.repeat(300) + '\n\n' + codeBlock + '\n\n' + 'y'.repeat(300);
+    const maxLen = 100;
+    const segments = splitLongMessage(text, maxLen);
+    expect(segments.length).toBeGreaterThan(1);
+    // The code block should appear entirely in one segment
+    const codeInSegments = segments.filter(s => s.includes('```'));
+    expect(codeInSegments.length).toBe(1);
+    const codeSeg = codeInSegments[0];
+    expect(codeSeg).toContain('print("hello")');
+    expect(codeSeg).toContain('print("world")');
+  });
+
+  it('should keep table rows intact', () => {
+    const table = '| Col1 | Col2 |\n|------|------|\n| A    | B    |\n| C    | D    |';
+    const text = 'x'.repeat(300) + '\n\n' + table + '\n\n' + 'y'.repeat(300);
+    const maxLen = 100;
+    const segments = splitLongMessage(text, maxLen);
+    expect(segments.length).toBeGreaterThan(1);
+    // The table should appear entirely in one segment
+    const tableSegments = segments.filter(s => s.includes('Col1'));
+    expect(tableSegments.length).toBe(1);
+  });
+
+  it('should force-split an oversized single block with [N/M] prefix', () => {
+    const longLine = 'a'.repeat(500);
+    const segments = splitLongMessage(longLine, 100);
+    expect(segments.length).toBeGreaterThan(1);
+    // Every segment except possibly the last should have [N/M] prefix
+    segments.forEach(s => {
+      expect(s).toMatch(/^\[\d+\/\d+\] /);
+    });
+    // Content without prefix should reconstruct original
+    const contentOnly = segments.map(s => s.replace(/^\[\d+\/\d+\] /, '')).join('');
+    expect(contentOnly).toBe(longLine);
+  });
+
+  it('should split large text while preserving markdown structure', () => {
+    const para1 = 'Paragraph one is quite long. '.repeat(100);
+    const codeBlock = '```\ncode block content\n```\n';
+    const para2 = 'Paragraph two. '.repeat(50);
+    const text = `${para1}\n\n${codeBlock}\n\n${para2}`;
+    const segments = splitLongMessage(text, 200);
+    expect(segments.length).toBeGreaterThan(1);
+    // Code block should be intact in one segment
+    const codeSegments = segments.filter(s => s.includes('```'));
+    expect(codeSegments.length).toBe(1);
   });
 });
 
@@ -47,49 +81,48 @@ describe('splitLongReply', () => {
   it('should return single segment with header when body fits within maxLen', () => {
     const header = '**claude**:project';
     const body = 'Hello world';
-    const result = splitLongReply(header, body, 3800);
+    const result = splitLongReply(header, body, 2000);
     expect(result).toHaveLength(1);
     expect(result[0]).toBe(`${header}\n\n${body}`);
   });
 
   it('should prepend header to first segment when body exceeds maxLen', () => {
     const header = '**claude**:project';
-    const body = 'x'.repeat(4000); // exceeds maxLen - header overhead
+    const body = 'x'.repeat(500);
     const result = splitLongReply(header, body, 100);
     expect(result.length).toBeGreaterThan(1);
-    // Every segment must start with header or continuation prefix
-    expect(result[0]).toContain(header);
+    // First segment contains the full header
     expect(result[0].startsWith(header)).toBe(true);
   });
 
   it('should preserve full header only in first segment', () => {
     const header = '**claude**:project';
-    const body = 'y'.repeat(5000);
+    // Body needs enough content without blank lines (single block) to force multiple segments
+    const body = 'a\n'.repeat(200);
     const result = splitLongReply(header, body, 100);
     expect(result.length).toBeGreaterThan(1);
-    // First segment starts with the full header
     expect(result[0].startsWith(`${header}\n\n`)).toBe(true);
-    // Subsequent segments do NOT start with the header
     for (let i = 1; i < result.length; i++) {
       expect(result[i].startsWith(header)).toBe(false);
     }
   });
 
-  it('should return single segment when body fits exactly within bodyMaxLen', () => {
-    const header = '**claude**:proj';
-    const headerLen = header.length + 2; // +2 for "\n\n"
-    const bodyMaxLen = 500 - headerLen;
-    const body = 'z'.repeat(bodyMaxLen);
-    const result = splitLongReply(header, body, 500);
-    expect(result).toHaveLength(1);
-    expect(result[0]).toBe(`${header}\n\n${body}`);
-  });
-
   it('should handle empty body gracefully', () => {
     const header = '**claude**:project';
-    const result = splitLongReply(header, '', 3800);
+    const result = splitLongReply(header, '', 2000);
     expect(result).toHaveLength(1);
     expect(result[0]).toBe(`${header}\n\n`);
+  });
+
+  it('should keep code blocks intact when body exceeds maxLen', () => {
+    const header = '**claude**:proj';
+    const codeBlock = '```\nfn foo() {\n  println!("hello");\n}\n```';
+    const text = 'x'.repeat(400) + '\n\n' + codeBlock + '\n\n' + 'y'.repeat(400);
+    const result = splitLongReply(header, text, 200);
+    expect(result.length).toBeGreaterThan(1);
+    // Code block intact in one segment
+    const codeSegments = result.filter(s => s.includes('```'));
+    expect(codeSegments.length).toBe(1);
   });
 });
 

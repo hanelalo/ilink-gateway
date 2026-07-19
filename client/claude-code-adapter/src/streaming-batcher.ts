@@ -8,7 +8,8 @@
  * - 2s idle: flush buffer if no new text
  * - 30s activity: notify "Claude is thinking..." (timeout prompt)
  *
- * Also handles T3.6 long message splitting (> 3800 chars → multi-segment).
+ * Also handles long message splitting (> 2000 chars → multi-segment).
+ * Splitting is markdown-aware: code blocks and tables are kept intact.
  */
 
 export interface StreamingBatcherOpts {
@@ -22,47 +23,169 @@ export interface StreamingBatcherOpts {
   checkIntervalMs?: number;
 }
 
+const FENCE_RE = /^```/;
+const TABLE_ROW_RE = /^\s*\|/;
+
+/**
+ * Split text into markdown blocks, keeping code fences and table rows intact.
+ *
+ * - Blank lines separate blocks (paragraph boundaries)
+ * - Code blocks (between ``` fences) are kept as single units
+ * - Consecutive table rows (lines starting with `|`) are kept as single units
+ */
+function splitMarkdownBlocks(text: string): string[] {
+  if (!text) return [];
+  const blocks: string[] = [];
+  const lines = text.split('\n');
+  let current: string[] = [];
+  let inCodeBlock = false;
+  let inTable = false;
+
+  const flush = () => {
+    if (current.length > 0) {
+      blocks.push(current.join('\n').trim());
+      current = [];
+    }
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+
+    // Code fence toggles
+    if (FENCE_RE.test(trimmed)) {
+      if (!inCodeBlock) {
+        flush();
+        inTable = false;
+      }
+      current.push(rawLine);
+      inCodeBlock = !inCodeBlock;
+      if (!inCodeBlock) {
+        flush();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      current.push(rawLine);
+      continue;
+    }
+
+    // Blank line = block boundary
+    if (!trimmed) {
+      flush();
+      inTable = false;
+      continue;
+    }
+
+    // Table row — keep consecutive | lines together
+    if (TABLE_ROW_RE.test(trimmed)) {
+      if (!inTable) {
+        flush();
+        inTable = true;
+      }
+      current.push(rawLine);
+      continue;
+    }
+
+    // Exiting table: non-table, non-empty line
+    if (inTable) {
+      flush();
+      inTable = false;
+    }
+
+    // Regular text
+    current.push(rawLine);
+  }
+
+  flush();
+  return blocks;
+}
+
+/**
+ * Greedily pack markdown blocks into segments under maxLen.
+ * Single blocks exceeding maxLen are force-split at character boundary
+ * with [N/M] prefix.
+ */
+function packBlocks(blocks: string[], maxLen: number): string[] {
+  if (!blocks.length) return [];
+  const packed: string[] = [];
+  let current = '';
+  const oversized: string[] = [];
+
+  for (const block of blocks) {
+    const candidate = current ? `${current}\n\n${block}` : block;
+    if (candidate.length <= maxLen) {
+      current = candidate;
+      continue;
+    }
+    if (current) {
+      packed.push(current);
+      current = '';
+    }
+    if (block.length <= maxLen) {
+      current = block;
+      continue;
+    }
+    oversized.push(block);
+  }
+
+  if (current) packed.push(current);
+
+  if (oversized.length > 0) {
+    for (const block of oversized) {
+      const totalSegments = packed.length + oversized.length;
+      const segments = truncateBlock(block, maxLen, packed.length + 1, totalSegments);
+      packed.push(...segments);
+    }
+  }
+
+  return packed;
+}
+
+/**
+ * Force-split a single oversized block at character boundary with [N/M] prefix.
+ */
+function truncateBlock(block: string, maxLen: number, startIndex: number, totalSegments: number): string[] {
+  const result: string[] = [];
+  let remaining = block;
+  let segNum = startIndex;
+  while (remaining.length > 0) {
+    const prefix = `[${segNum}/${totalSegments}] `;
+    const usable = maxLen - prefix.length;
+    if (usable <= 0) {
+      result.push(remaining.slice(0, maxLen));
+      remaining = remaining.slice(maxLen);
+    } else if (remaining.length <= usable) {
+      result.push(`${prefix}${remaining}`);
+      break;
+    } else {
+      result.push(`${prefix}${remaining.slice(0, usable)}`);
+      remaining = remaining.slice(usable);
+    }
+    segNum++;
+    totalSegments = Math.max(totalSegments, result.length);
+  }
+  return result;
+}
+
 /**
  * Split a message longer than `maxLen` into numbered segments.
- * E.g. `[1/3] first-third`, `[2/3] second-third`, `[3/3] last-third`
+ * Splitting is markdown-aware: code blocks and tables are kept intact.
+ *
+ * E.g. for oversized text:
+ *   `[1/3] first-third`, `[2/3] second-third`, `[3/3] last-third`
  *
  * Segment content length is roughly balanced (maxLen per segment minus
  * overhead of the prefix like `[1/3] `).
  */
 export function splitLongMessage(
   text: string,
-  maxLen = 3800,
+  maxLen = 2000,
 ): string[] {
+  if (!text) return [text];
   if (text.length <= maxLen) return [text];
-
-  // Calculate number of segments
-  // Reserve ~10 chars per segment for "[N/M] " prefix
-  const prefixOverhead = 10;
-  const usableLen = maxLen - prefixOverhead;
-
-  if (usableLen <= 0) {
-    // Extreme case: maxLen is too small for prefix, just return as-is
-    return [text];
-  }
-
-  // Try to split at a reasonable boundary
-  const segments: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    // Calculate total segments for prefix
-    const totalSegments = Math.ceil(text.length / usableLen);
-    const currentSegment = segments.length + 1;
-
-    // Take a chunk
-    let chunk = remaining.slice(0, usableLen);
-    remaining = remaining.slice(usableLen);
-
-    // Add prefix
-    segments.push(`[${currentSegment}/${totalSegments}] ${chunk}`);
-  }
-
-  return segments;
+  const blocks = splitMarkdownBlocks(text);
+  return packBlocks(blocks, maxLen);
 }
 
 /**
@@ -73,10 +196,14 @@ export function splitLongMessage(
 export function splitLongReply(
   header: string,
   body: string,
-  maxLen = 3800,
+  maxLen = 2000,
 ): string[] {
   const headerLen = header.length + 2; // +2 for "\n\n"
   const bodyMaxLen = maxLen - headerLen;
+
+  if (bodyMaxLen <= 0) {
+    return [`${header}\n\n${body}`];
+  }
 
   if (body.length <= bodyMaxLen) {
     return [`${header}\n\n${body}`];

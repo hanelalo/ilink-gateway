@@ -7,7 +7,7 @@
  * Features:
  * - T3.4: Streaming batching with idle timeout and buffer flush
  * - T3.5: 30s activity timeout sends "Claude is thinking..." prompt
- * - T3.6: Long replies (>3800 chars) split into numbered segments
+ * - T3.6: Long replies (>2000 chars) split into numbered segments
  * - T3.7: Graceful shutdown via SIGINT/SIGTERM
  * - T3.8: Global error handlers (uncaughtException, unhandledRejection)
  * - T3.9: Poll loop with self-healing (retry on error)
