@@ -76,8 +76,7 @@ wechat-gateway/
 │       └── config.ts            # Env config loader
 │
 ├── scripts/
-│   ├── build.sh                 # Build gateway Rust binary
-│   └── wechat-claude.sh         # Shell wrapper: launch claude-adapter via bun run
+│   └── build.sh                 # Build gateway + wechat-claude binaries
 │
 └── docs/
 ```
@@ -122,7 +121,7 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - A WeChat account (for QR code login)
-- [Bun](https://bun.sh) 1.3+ (for running the Claude Code Adapter)
+- [Bun](https://bun.sh) 1.3+ (build-time dependency for wechat-claude)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/) installed (for the plugin path)
 - Python 3.10+ with `aiohttp`
 - [Claude Code](https://claude.ai/code) CLI (for Claude Code Adapter)
@@ -217,7 +216,7 @@ launchctl list com.wechat-gateway
 
 #### Run Claude Adapter as a Background Service
 
-Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` as a persistent daemon (requires Bun installed at `~/.bun/bin/bun`):
+Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` as a persistent daemon:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -234,7 +233,7 @@ Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` a
     <array>
         <string>/usr/bin/caffeinate</string>
         <string>-disu</string>
-        <string>/Users/youruser/.local/bin/wechat-claude</string>
+        <string>/path/to/wechat-gateway/target/release/wechat-claude</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -334,17 +333,15 @@ Hermes sends the pairing code back through the gateway to you on WeChat. After p
 
 ### 5. Start the Claude Code Adapter (Alternative Agent)
 
-The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. It runs via Bun without requiring Node.js:
+The Claude Code Adapter is a separate agent that connects to Claude Code instead of Hermes. It's compiled into a standalone binary with no runtime dependencies:
 
 ```bash
-# Build gateway
+# Build everything
 ./scripts/build.sh
 
 # Run
 ./target/release/wechat-claude
 ```
-
-> **Note**: Use `scripts/wechat-claude.sh` as the launch entry point — it handles log cleanup and points to the compiled binary at `target/release/wechat-claude`. A symlink at `~/.local/bin/wechat-claude` is also available.
 
 The adapter registers itself as `claude` agent with the gateway. Switch between agents from WeChat:
 

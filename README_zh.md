@@ -77,8 +77,7 @@ wechat-gateway/
 │       └── config.ts            # 环境变量加载
 │
 ├── scripts/
-│   ├── build.sh                 # 构建 gateway Rust 二进制
-│   └── wechat-claude.sh         # 通过 bun run 启动 claude-adapter 的包装脚本
+│   └── build.sh                 # 构建 gateway + wechat-claude 二进制
 │
 └── docs/
 ```
@@ -123,7 +122,7 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - 一个微信账号（用于扫码登录）
-- [Bun](https://bun.sh) 1.3+（用于运行 Claude Code Adapter）
+- [Bun](https://bun.sh) 1.3+（编译 wechat-claude 时使用）
 - 已安装 [Hermes Agent](https://hermes-agent.nousresearch.com/)
 - Python 3.10+ 并安装 `aiohttp`
 - [Claude Code](https://claude.ai/code) CLI（用于 Claude Code Adapter）
@@ -218,7 +217,7 @@ launchctl list com.wechat-gateway
 
 #### 以常驻后台服务运行 Claude Adapter
 
-创建 `~/Library/LaunchAgents/com.wechat-claude.plist`（需要 Bun 安装在 `~/.bun/bin/bun`）：
+创建 `~/Library/LaunchAgents/com.wechat-claude.plist`：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -235,7 +234,7 @@ launchctl list com.wechat-gateway
     <array>
         <string>/usr/bin/caffeinate</string>
         <string>-disu</string>
-        <string>/Users/youruser/.local/bin/wechat-claude</string>
+        <string>/path/to/wechat-gateway/target/release/wechat-claude</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -332,20 +331,17 @@ hermes pairing approve <wxid> wechat_gateway
 ```
 
 Hermes 会通过 gateway 将配对码发回你的微信。配对完成后，消息正常处理，所有斜杠命令（如 `/new`）均可用。
-
 ### 5. 启动 Claude Code Adapter（备选 Agent）
 
-Claude Code Adapter 是独立的 agent（Node.js/TypeScript），它连接到 Claude Code 而不是 Hermes。通过 Bun 运行，无需 Node.js 环境：
+Claude Code Adapter 是独立的 agent，连接到 Claude Code 而非 Hermes。编译为独立二进制，无需任何运行时依赖：
 
 ```bash
-# 构建 gateway
+# 一键构建
 ./scripts/build.sh
 
 # 运行
 ./target/release/wechat-claude
 ```
-
-> **注意**：使用 `scripts/wechat-claude.sh` 作为启动入口——它会清理过期日志并启动编译好的二进制。`~/.local/bin/wechat-claude` 也有软链接。
 
 该适配器以 `claude` 名称注册到网关。在微信中切换 agent：
 

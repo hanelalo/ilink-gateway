@@ -13,6 +13,7 @@
  * - T3.9: Poll loop with self-healing (retry on error)
  */
 
+import os from 'node:os';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -61,6 +62,9 @@ export async function start(): Promise<void> {
   process.on('unhandledRejection', (reason) => {
     console.error('Unhandled rejection:', reason);
   });
+
+  // Clean up log files from previous calendar days (startup only)
+  cleanupOldLogs();
 
   const config = loadConfig();
   const client = new GatewayClient(config.gatewayUrl, config.agentName);
@@ -579,10 +583,48 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Auto-start when run directly
+/**
+ * Remove log files in ~/.wechat-gateway/ that were last modified on a
+ * previous calendar day. Runs once at startup, cross-platform.
+ */
+function cleanupOldLogs(): void {
+  const homedir = os.homedir();
+  const logDir = path.join(homedir, '.wechat-gateway');
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(logDir);
+  } catch {
+    return; // directory doesn't exist yet
+  }
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  for (const name of entries) {
+    if (!name.endsWith('.log')) continue;
+    const filePath = path.join(logDir, name);
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) continue;
+      const modTime = stat.mtime;
+      const fileDay = `${modTime.getFullYear()}-${String(modTime.getMonth() + 1).padStart(2, '0')}-${String(modTime.getDate()).padStart(2, '0')}`;
+      if (fileDay < today) {
+        fs.unlinkSync(filePath);
+        console.log(`Removed old log: ${name}`);
+      }
+    } catch {
+      // skip files we can't stat or remove
+    }
+  }
+}
+
+// Auto-start when run directly (tsx, node, or compiled binary)
 if (
-  process.argv[1] &&
-  (process.argv[1].endsWith('/index.ts') || process.argv[1].endsWith('/index.js'))
+  !process.argv[1] ||
+  process.argv[1].endsWith('/index.ts') ||
+  process.argv[1].endsWith('/index.js') ||
+  process.argv[1].endsWith('wechat-claude')
 ) {
   start().catch((err) => {
     console.error('Fatal error:', err);
