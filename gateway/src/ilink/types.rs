@@ -456,6 +456,7 @@ pub struct SendMessageResponse {
     #[serde(default)]
     pub message_id: Option<i64>,
     /// Catch unknown fields for protocol probing.
+    #[allow(dead_code)]
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
