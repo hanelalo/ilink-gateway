@@ -626,7 +626,8 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
 
     async def _send_reply(self, reply_to_id: str, text: str, media_paths: Optional[list[str]] = None) -> SendResult:
         """POST /api/agents/{name}/reply with the response."""
-        text = self._ensure_header(text)
+        if not media_paths:
+            text = self._ensure_header(text)
         segments = _split_content(text, CONTENT_MAX_LENGTH)
 
         async def _send_one(content: str) -> SendResult:
