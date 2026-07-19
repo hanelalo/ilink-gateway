@@ -595,7 +595,8 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         Used for pairing codes, notifications, etc. where there is no
         pre-existing message context.
         """
-        text = self._ensure_header(text)
+        if not media_paths:
+            text = self._ensure_header(text)
         segments = _split_content(text, CONTENT_MAX_LENGTH)
 
         async def _send_one(content: str) -> SendResult:
