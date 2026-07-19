@@ -128,7 +128,6 @@ pub async fn handle_register(
                 Json(serde_json::json!({
                     "ok": true,
                     "active_agent": active,
-                    "wechat_connected": false,
                 })),
             )
         }

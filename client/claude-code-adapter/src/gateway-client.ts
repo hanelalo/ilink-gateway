@@ -22,7 +22,6 @@ export interface PollResponse {
 export interface RegisterResponse {
   ok: boolean;
   active_agent?: string;
-  wechat_connected?: boolean;
   error?: string;
 }
 

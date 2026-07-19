@@ -20,7 +20,7 @@ beforeEach(() => {
 describe('GatewayClient', () => {
   describe('register', () => {
     it('should POST to /api/agents/register with name and capabilities', async () => {
-      mockFetch(200, { ok: true, active_agent: 'claude', wechat_connected: false });
+      mockFetch(200, { ok: true, active_agent: 'claude' });
 
       const client = new GatewayClient(BASE, 'claude');
       const res = await client.register();
