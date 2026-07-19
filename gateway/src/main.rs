@@ -262,11 +262,13 @@ async fn main() -> Result<()> {
                         .map(|ref_msg| ref_msg.message_item.msg_id.clone());
 
                     if let Some(ref_id) = ref_msg_id {
+                        tracing::info!("reference reply detected: ref_msg_id={}", ref_id);
                         // 缩小 store 锁范围，避免与 router 锁形成死锁
                         let context_json = store_arc.lock().unwrap().get_msg_agent_context(&ref_id).unwrap_or(None);
                         // store_guard 在这里自动 drop
 
-                        if let Some(context_json) = context_json {
+                        if let Some(ref context_json) = context_json {
+                            tracing::info!("reference reply: found agent_context={} for ref_msg_id={}", context_json, ref_id);
                             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&context_json) {
                                 if let Some(agent) = parsed.get("agent").and_then(|v| v.as_str()) {
                                     let mut router_guard = router_arc.lock().unwrap();
@@ -275,7 +277,7 @@ async fn main() -> Result<()> {
                                             "reference reply: routing to agent '{}' (ref_msg_id={})",
                                             agent, ref_id
                                         );
-                                        match router_guard.route_to_agent(&msg, agent, Some(context_json)) {
+                                        match router_guard.route_to_agent(&msg, agent, Some(context_json.clone())) {
                                             Ok(()) => true,
                                             Err(e) => {
                                                 tracing::warn!("route_to_agent error: {e}");
