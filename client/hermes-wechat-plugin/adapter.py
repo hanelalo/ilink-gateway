@@ -426,7 +426,8 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
             return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
         final_meta: dict = dict(metadata or {})
         final_meta["media_paths"] = [validated]
-        content = caption or file_name or ""
+        display_name = file_name or os.path.basename(validated)
+        content = caption or display_name or ""
         return await self.send(chat_id=chat_id, content=content, reply_to=reply_to, metadata=final_meta)
 
     async def send_multiple_images(
