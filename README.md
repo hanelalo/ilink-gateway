@@ -76,7 +76,8 @@ wechat-gateway/
 │       └── config.ts            # Env config loader
 │
 ├── scripts/
-│   └── build.sh                 # Build all binaries (gateway + wechat-claude)
+│   ├── build.sh                 # Build all binaries (gateway + wechat-claude)
+│   └── wechat-claude.sh         # Shell wrapper to launch claude-adapter via bun run
 │
 └── docs/
 ```
@@ -121,9 +122,9 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - A WeChat account (for QR code login)
+- [Bun](https://bun.sh) 1.3+ (for running the Claude Code Adapter)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/) installed (for the plugin path)
 - Python 3.10+ with `aiohttp`
-- Node.js 20+ (for Claude Code Adapter)
 - [Claude Code](https://claude.ai/code) CLI (for Claude Code Adapter)
 
 ### 1. Build and Run the Gateway
@@ -216,7 +217,7 @@ launchctl list com.wechat-gateway
 
 #### Run Claude Adapter as a Background Service
 
-Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` as a persistent daemon:
+Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` as a persistent daemon (requires Bun installed at `~/.bun/bin/bun`):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -231,8 +232,20 @@ Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` a
 
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/wechat-gateway/target/release/wechat-claude</string>
+        <string>/usr/bin/caffeinate</string>
+        <string>-disu</string>
+        <string>/Users/youruser/.local/bin/wechat-claude</string>
     </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLAUDE_MODEL</key>
+        <string>sonnet</string>
+        <key>CLAUDE_EFFORT</key>
+        <string>high</string>
+        <key>CLAUDE_CWD</key>
+        <string>/Users/youruser</string>
+    </dict>
 
     <key>RunAtLoad</key>
     <true/>
@@ -252,14 +265,13 @@ Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` a
 #### Updating after Code Changes
 
 ```bash
-# Build everything
 ./scripts/build.sh
 
-# Restart gateway (no re-scan required)
+# Restart gateway
 launchctl unload ~/Library/LaunchAgents/com.wechat-gateway.plist
 launchctl load ~/Library/LaunchAgents/com.wechat-gateway.plist
 
-# Restart claude adapter (if using it)
+# Restart claude adapter
 launchctl unload ~/Library/LaunchAgents/com.wechat-claude.plist
 launchctl load ~/Library/LaunchAgents/com.wechat-claude.plist
 ```
@@ -322,10 +334,13 @@ Hermes sends the pairing code back through the gateway to you on WeChat. After p
 
 ### 5. Start the Claude Code Adapter (Alternative Agent)
 
-The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. After building, it runs as a standalone binary with no Node.js dependency:
+The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. It runs via Bun without requiring Node.js:
 
 ```bash
-# Build (included in scripts/build.sh, or run separately):
+# Build (included in scripts/build.sh):
+./scripts/build.sh
+
+# Or build just the adapter manually:
 cd client/claude-code-adapter
 npm install
 bun build --compile --target=bun --outfile=../../target/release/wechat-claude src/index.ts
@@ -333,6 +348,8 @@ bun build --compile --target=bun --outfile=../../target/release/wechat-claude sr
 # Run
 ./target/release/wechat-claude
 ```
+
+> **Note**: You can also use `scripts/wechat-claude.sh` as a launch entry point, which runs `bun run` directly (avoids the Bun `--compile` segfault bug on macOS). A symlink `wechat-claude` to this script is available at `~/.local/bin/wechat-claude`.
 
 The adapter registers itself as `claude` agent with the gateway. Switch between agents from WeChat:
 
