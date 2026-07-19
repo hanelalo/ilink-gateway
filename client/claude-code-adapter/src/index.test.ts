@@ -675,7 +675,7 @@ describe('index start', () => {
 
     mockPoll
       .mockResolvedValueOnce([
-        makeMessage({ id: 'msg-close', from_user: 'wxid_test', text: '/cd close target' }),
+        makeMessage({ id: 'msg-close', from_user: 'wxid_test', text: '/close target' }),
       ])
       .mockResolvedValue([]);
 

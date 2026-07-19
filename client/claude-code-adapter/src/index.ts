@@ -180,7 +180,7 @@ export async function start(): Promise<void> {
         '/cd <target>    — 切换到指定目录或别名',
         '/cd + <n> <p>   — 添加别名',
         '/cd - <n>       — 删除别名',
-        '/cd close <t>   — 关闭工作区',
+        '/close <target> — 关闭指定工作区',
         '/approve        — 批准当前工具调用',
         '/deny           — 拒绝当前工具调用',
         '/approve session— 批准并记住当前工具',
@@ -189,6 +189,36 @@ export async function start(): Promise<void> {
         '/agent-help     — 显示此帮助',
         '/help           — 显示此帮助',
       ].join('\n'), undefined, agentContext);
+      return;
+    }
+
+    // /close command — close workspace (top-level shortcut for /cd close)
+    if (/^\/close\b/.test(text)) {
+      const user = ensureUser(wxid);
+      const parts = text.trim().split(/\s+/);
+      const target = parts[1];
+      if (!target) {
+        const basename = path.basename(user.activeCwd || config.cwd);
+        const agentContext = JSON.stringify({ agent: config.agentName, workspace: basename });
+        await client.reply(msg.id, [
+          formatReplyHeader(basename),
+          '',
+          '用法: /close <target>',
+          '关闭指定工作区（终止运行中的 Claude session 并删除本地状态）',
+        ].join('\n'), undefined, agentContext);
+        return;
+      }
+      const reply = closeWorkspace(user, target, {
+        abort: (abortCwd) => {
+          queryManager.abort(wxid, abortCwd);
+        },
+        save: persistSessions,
+      });
+      // Extract workspace basename from the reply's header (e.g. "**claude**:foo")
+      const matchHeader = reply.match(/\*\*claude\*\*:(\S+)/);
+      const wsBasename = matchHeader ? matchHeader[1] : path.basename(user.activeCwd || config.cwd);
+      const agentContext = JSON.stringify({ agent: config.agentName, workspace: wsBasename });
+      await client.reply(msg.id, reply, undefined, agentContext);
       return;
     }
 
@@ -473,20 +503,6 @@ export async function start(): Promise<void> {
         return formatStatus(user);
       }
       return removeAlias(user, aliasName, persistSessions);
-    }
-
-    // /cd close <target>
-    if (target === 'close') {
-      const closeTarget = parts[2];
-      if (!closeTarget) {
-        return formatStatus(user);
-      }
-      return closeWorkspace(user, closeTarget, {
-        abort: (abortCwd) => {
-          queryManager.abort(wxid, abortCwd);
-        },
-        save: persistSessions,
-      });
     }
 
     // /cd <target> — switch workspace
