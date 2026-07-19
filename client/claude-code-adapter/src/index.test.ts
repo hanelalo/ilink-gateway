@@ -30,7 +30,7 @@ import { start } from './index.js';
  * Wait for a mock to be called at least `minCalls` times within `timeout` ms.
  */
 async function waitForMock(
-  spy: MockInstance | MockInstance<any[], any>,
+  spy: any,
   minCalls: number,
   timeout = 5000,
 ) {
@@ -284,7 +284,7 @@ describe('index start', () => {
     // Mock startClaudeSession to simulate calling onAssistantText
     const mockStartSession = vi.mocked(startClaudeSession);
     mockStartSession.mockImplementation(
-      ((opts: Record<string, unknown>) => {
+      ((opts: any) => {
         const onAssistantText = opts.onAssistantText as ((text: string) => void) | undefined;
         // Simulate Claude sending a reply
         onAssistantText?.('好的，我来帮你写一个脚本。');
@@ -321,7 +321,7 @@ describe('index start', () => {
 
     const sessionInvocations: Array<{ prompt: string }> = [];
     vi.mocked(startClaudeSession).mockImplementation(
-      ((opts: Record<string, unknown>) => {
+      ((opts: any) => {
         sessionInvocations.push({ prompt: opts.prompt as string });
         return firstSessionPromise;
       }) as unknown as typeof startClaudeSession,
@@ -368,7 +368,7 @@ describe('index start', () => {
     const sessionInvocations: Array<{ prompt: string }> = [];
     let callCount = 0;
     vi.mocked(startClaudeSession).mockImplementation(
-      ((opts: Record<string, unknown>) => {
+      ((opts: any) => {
         callCount++;
         sessionInvocations.push({ prompt: opts.prompt as string });
         if (callCount === 1) {
@@ -480,7 +480,7 @@ describe('index start', () => {
 
     let sessionCallCount = 0;
     vi.mocked(startClaudeSession).mockImplementation(
-      ((opts: Record<string, unknown>) => {
+      ((opts: any) => {
         sessionCallCount++;
         if (sessionCallCount === 1) {
           return firstSessionPromise;
@@ -550,7 +550,7 @@ describe('index start', () => {
     const onSessionInitRef: { current?: (id: string) => void } = {};
 
     vi.mocked(startClaudeSession).mockImplementation(
-      ((opts: Record<string, unknown>) => {
+      ((opts: any) => {
         onSessionInitRef.current = opts.onSessionInit as ((id: string) => void) | undefined;
         return Promise.resolve({ sessionId: 'session-init-id', success: true });
       }) as unknown as typeof startClaudeSession,
@@ -635,7 +635,7 @@ describe('index start', () => {
 
   it('should handle /cd close command', async () => {
     vi.mocked(startClaudeSession).mockImplementation(
-      ((_opts: Record<string, unknown>) => {
+      ((_opts: any) => {
         return Promise.resolve({ sessionId: 'session-close', success: true });
       }) as unknown as typeof startClaudeSession,
     );

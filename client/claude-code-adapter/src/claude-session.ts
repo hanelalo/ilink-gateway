@@ -64,9 +64,12 @@ export async function startClaudeSession(
           opts.permissionMode === 'bypassPermissions' ? true : undefined,
         ...(opts.canUseTool
           ? {
-              canUseTool: async (toolName: string, input: unknown) => {
+              canUseTool: async (toolName: string, input: Record<string, unknown>) => {
                 const decision = await opts.canUseTool!(toolName, input);
-                return { behavior: decision, updatedInput: input };
+                if (decision === 'allow') {
+                  return { behavior: 'allow' as const, updatedInput: input };
+                }
+                return { behavior: 'deny' as const, message: 'User denied' };
               },
             }
           : {}),

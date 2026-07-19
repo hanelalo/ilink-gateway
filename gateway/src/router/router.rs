@@ -203,6 +203,7 @@ impl Router {
             }
             Some(RouterCommand::ListAgents) => Ok(Some(self.build_list_text())),
             Some(RouterCommand::Status) => Ok(Some(self.build_status_text())),
+            Some(RouterCommand::Help) => Ok(Some(self.build_help_text())),
             Some(RouterCommand::Cmd {
                 command,
                 timeout_secs,
@@ -228,6 +229,18 @@ impl Router {
             // Not a recognized gateway command — let the caller route to an agent.
             None => Ok(None),
         }
+    }
+
+    /// Build a help text for /gateway-help command.
+    pub fn build_help_text(&self) -> String {
+        format!(
+            "Gateway commands:\n\
+             /use <name> — switch to an agent\n\
+             /list       — list registered agents\n\
+             /status     — show gateway status\n\
+             /cmd <shell> — execute a shell command\n\
+             /gateway-help — show this help"
+        )
     }
 
     /// Build a Status string for /status command.

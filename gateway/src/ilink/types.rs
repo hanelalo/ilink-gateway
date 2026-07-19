@@ -562,6 +562,7 @@ pub enum RouterCommand {
     ListAgents,
     Status,
     Cmd { command: String, timeout_secs: u64 },
+    Help,
 }
 
 #[cfg(test)]

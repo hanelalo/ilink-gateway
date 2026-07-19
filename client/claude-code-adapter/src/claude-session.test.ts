@@ -228,10 +228,7 @@ describe('startClaudeSession', () => {
   it('should call canUseTool and allow tool use', async () => {
     const sessionId = 'session-tool-1';
 
-    vi.mocked(query).mockImplementation((opts: {
-      prompt: string;
-      options?: Record<string, unknown>;
-    }) => {
+    vi.mocked(query).mockImplementation((opts: any) => {
       const canUse = opts.options?.canUseTool as ((name: string, input: unknown) => Promise<{ behavior: string; updatedInput: unknown }>) | undefined;
       const gen = wrapWithCanUseTool(
         [systemInit(sessionId), assistantToolUse('Bash', { command: 'ls' }, 'tool-1', sessionId), resultSuccess(sessionId)],
@@ -256,10 +253,7 @@ describe('startClaudeSession', () => {
   it('should call canUseTool and deny tool use', async () => {
     const sessionId = 'session-tool-2';
 
-    vi.mocked(query).mockImplementation((opts: {
-      prompt: string;
-      options?: Record<string, unknown>;
-    }) => {
+    vi.mocked(query).mockImplementation((opts: any) => {
       const canUse = opts.options?.canUseTool as ((name: string, input: unknown) => Promise<{ behavior: string; updatedInput: unknown }>) | undefined;
       const gen = wrapWithCanUseTool(
         [systemInit(sessionId), assistantToolUse('Bash', { command: 'rm -rf /' }, 'tool-2', sessionId), resultSuccess(sessionId)],
@@ -284,10 +278,7 @@ describe('startClaudeSession', () => {
   it('should handle mixed text and tool_use in a single assistant message', async () => {
     const sessionId = 'session-mixed-1';
 
-    vi.mocked(query).mockImplementation((opts: {
-      prompt: string;
-      options?: Record<string, unknown>;
-    }) => {
+    vi.mocked(query).mockImplementation((opts: any) => {
       const canUse = opts.options?.canUseTool as ((name: string, input: unknown) => Promise<{ behavior: string; updatedInput: unknown }>) | undefined;
       const gen = wrapWithCanUseTool(
         [systemInit(sessionId), assistantMixed('Let me check...', 'Read', { path: '/tmp/test.txt' }, 'tool-3', sessionId), resultSuccess(sessionId)],

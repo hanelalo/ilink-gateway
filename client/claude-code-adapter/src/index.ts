@@ -134,6 +134,30 @@ export async function start(): Promise<void> {
     const text = msg.text.trim();
 
     // ---- 1. Global command interception ----
+    // /agent-help command
+    if (/^\/agent-help\b/.test(text) || /^\/help\b/.test(text)) {
+      const user = ensureUser(wxid);
+      const basename = path.basename(user.activeCwd || config.cwd);
+      await client.reply(msg.id, [
+        formatReplyHeader(basename),
+        '',
+        '客户端命令:',
+        '/cd             — 管理工作目录和别名',
+        '/cd <target>    — 切换到指定目录或别名',
+        '/cd + <n> <p>   — 添加别名',
+        '/cd - <n>       — 删除别名',
+        '/cd close <t>   — 关闭工作区',
+        '/approve        — 批准当前工具调用',
+        '/deny           — 拒绝当前工具调用',
+        '/approve session— 批准并记住当前工具',
+        '/approve on     — 开启自动审批模式',
+        '/approve off    — 关闭自动审批模式',
+        '/agent-help     — 显示此帮助',
+        '/help           — 显示此帮助',
+      ].join('\n'));
+      return;
+    }
+
     // /cd command
     if (/^\/cd\b/.test(text)) {
       const reply = handleCdCommand(wxid, text);

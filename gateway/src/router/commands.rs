@@ -18,6 +18,7 @@ use crate::ilink::types::RouterCommand;
 /// - `/list` → `RouterCommand::ListAgents`
 /// - `/status` → `RouterCommand::Status`
 /// - `/cmd [timeout <secs>] <shell command>` → `RouterCommand::Cmd { command, timeout_secs }`
+/// - `/gateway-help` → `RouterCommand::Help`
 ///
 /// Returns `None` for non-command text (no leading `/`).
 pub fn parse_command(text: &str) -> Option<RouterCommand> {
@@ -46,6 +47,7 @@ pub fn parse_command(text: &str) -> Option<RouterCommand> {
         }
         "list" => Some(RouterCommand::ListAgents),
         "status" => Some(RouterCommand::Status),
+        "gateway-help" => Some(RouterCommand::Help),
         "cmd" => {
             if parts.len() < 2 {
                 return None;
