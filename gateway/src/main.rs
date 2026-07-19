@@ -61,6 +61,9 @@ struct MessageContextInfo {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 0. Clean up log files from previous days (cross-platform log rotation)
+    cleanup_old_logs()?;
+
     // 1. Load config from environment
     let config = GatewayConfig::from_env()?;
 
@@ -1129,6 +1132,72 @@ fn expand_tilde(path: &str) -> String {
     } else {
         format!("{}{}", home, &path[1..])
     }
+}
+
+/// Remove log files in ~/.wechat-gateway/ that were last modified on a
+/// previous calendar day.  This runs once at startup and is cross-platform
+/// (no cron, no launchd rotation, no platform-specific tool).
+fn cleanup_old_logs() -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let log_dir = format!("{}/.wechat-gateway", home);
+
+    let dir = match std::fs::read_dir(&log_dir) {
+        Ok(d) => d,
+        Err(_) => return Ok(()), // directory doesn't exist yet
+    };
+
+    let now = chrono::Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+
+    for entry in dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !path.extension().map_or(false, |ext| ext == "log") {
+            continue;
+        }
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        // Only touch regular files
+        if !meta.is_file() {
+            continue;
+        }
+
+        // Compare last-modified date with today
+        let modified = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // Convert SystemTime to chrono DateTime<Local>
+        let duration = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        // from_timestamp returns DateTime<Utc>, then convert to local
+        let Some(dt) = chrono::DateTime::from_timestamp(
+            duration.as_secs() as i64,
+            duration.subsec_nanos(),
+        ) else {
+            continue;
+        };
+        let dt: chrono::DateTime<chrono::Local> = dt.with_timezone(&chrono::Local);
+
+        let file_day = dt.format("%Y-%m-%d").to_string();
+        if file_day < today {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("failed to remove old log {:?}: {e}", path);
+            } else {
+                tracing::info!("removed old log {:?}", path);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Media download helper ────────────────────────────────────────────────
