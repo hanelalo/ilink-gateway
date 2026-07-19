@@ -141,6 +141,80 @@ cargo build --release
 
 On first run, the gateway prints a QR code in the terminal. Scan it with WeChat and tap **Confirm** on your phone. Credentials are saved to `~/.wechat-gateway/data.db` and reused automatically on restart.
 
+#### Run as a Background Service (macOS launchd)
+
+To keep the gateway running persistently across reboots, lock screen, and sleep, use launchd with `caffeinate`:
+
+Create `~/Library/LaunchAgents/com.wechat-gateway.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wechat-gateway</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-disu</string>
+        <string>/path/to/wechat-gateway/target/release/wechat-gateway</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/youruser/.wechat-gateway/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/youruser/.wechat-gateway/stderr.log</string>
+</dict>
+</plist>
+```
+
+Key points:
+- `ProcessType: Background` prevents macOS from suspending the process when the display is off
+- `caffeinate -disu` prevents display sleep, system idle sleep, and system sleep
+- `KeepAlive: true` auto-restarts the process on crash
+- `RunAtLoad: true` starts on login
+
+Load and start:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.wechat-gateway.plist
+```
+
+Check status:
+
+```bash
+launchctl list com.wechat-gateway
+```
+
+#### Updating after Code Changes
+
+```bash
+cd /path/to/wechat-gateway
+cargo build --release
+launchctl unload ~/Library/LaunchAgents/com.wechat-gateway.plist
+launchctl load ~/Library/LaunchAgents/com.wechat-gateway.plist
+```
+
+Credentials are persisted in SQLite — no re-scan required.
+
 ### 2. Install the Hermes Plugin
 
 Symlink the plugin into Hermes' plugin directory:

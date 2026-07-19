@@ -142,6 +142,80 @@ cargo build --release
 
 首次运行会在终端打印二维码，用微信扫码并在手机上点**确认登录**。凭证保存到 `~/.wechat-gateway/data.db`，后续启动自动复用。
 
+#### 以常驻后台服务运行（macOS launchd）
+
+为了让 gateway 在重启、锁屏、休眠后持续运行，使用 launchd + `caffeinate`：
+
+创建 `~/Library/LaunchAgents/com.wechat-gateway.plist`：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wechat-gateway</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-disu</string>
+        <string>/path/to/wechat-gateway/target/release/wechat-gateway</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/youruser/.wechat-gateway/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/youruser/.wechat-gateway/stderr.log</string>
+</dict>
+</plist>
+```
+
+要点说明：
+- `ProcessType: Background` — 防止 macOS 在屏幕关闭后挂起进程
+- `caffeinate -disu` — 阻止显示器休眠、系统空闲休眠、系统休眠
+- `KeepAlive: true` — 崩溃后自动重启
+- `RunAtLoad: true` — 登录时自动启动
+
+加载并启动：
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.wechat-gateway.plist
+```
+
+查看状态：
+
+```bash
+launchctl list com.wechat-gateway
+```
+
+#### 更新代码后重新部署
+
+```bash
+cd /path/to/wechat-gateway
+cargo build --release
+launchctl unload ~/Library/LaunchAgents/com.wechat-gateway.plist
+launchctl load ~/Library/LaunchAgents/com.wechat-gateway.plist
+```
+
+凭据保存在 SQLite 中，无需重新扫码。
+
 ### 2. 安装 Hermes 插件
 
 将插件软链接到 Hermes 插件目录：
