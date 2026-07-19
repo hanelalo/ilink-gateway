@@ -122,7 +122,11 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - 一个微信账号（用于扫码登录）
-- [Bun](https://bun.sh) 1.3+（编译 wechat-claude 时使用）
+- [Bun](https://bun.sh) 1.3+（编译 wechat-claude 时需要）。安装：
+
+  ```bash
+  curl -fsSL https://bun.sh/install | bash
+  ```
 - 已安装 [Hermes Agent](https://hermes-agent.nousresearch.com/)
 - Python 3.10+ 并安装 `aiohttp`
 - [Claude Code](https://claude.ai/code) CLI（用于 Claude Code Adapter）

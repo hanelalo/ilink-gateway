@@ -121,7 +121,11 @@ WeChat → long-poll getupdates → Router.handle_incoming()
 
 - Rust 1.75+
 - A WeChat account (for QR code login)
-- [Bun](https://bun.sh) 1.3+ (build-time dependency for wechat-claude)
+- [Bun](https://bun.sh) 1.3+ (build-time dependency for wechat-claude). Install:
+
+  ```bash
+  curl -fsSL https://bun.sh/install | bash
+  ```
 - [Hermes Agent](https://hermes-agent.nousresearch.com/) installed (for the plugin path)
 - Python 3.10+ with `aiohttp`
 - [Claude Code](https://claude.ai/code) CLI (for Claude Code Adapter)
