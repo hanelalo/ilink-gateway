@@ -67,7 +67,7 @@ export class GatewayClient {
     return res.json() as Promise<RegisterResponse>;
   }
 
-  async poll(): Promise<AgentMessage[]> {
+  async poll(): Promise<AgentMessage[] | null> {
     const res = await this.request(
       `${this.baseUrl}/api/agents/${this.agentName}/poll`,
       undefined,
@@ -77,7 +77,7 @@ export class GatewayClient {
       return [];
     }
     if (res.status === 404) {
-      return [];
+      return null; // agent not registered — caller should re-register
     }
     const data = (await res.json()) as PollResponse;
     return data.messages ?? [];

@@ -498,6 +498,17 @@ export async function start(): Promise<void> {
     if (!running) return;
     try {
       const messages = await client.poll();
+      // null means 404 — agent not registered, re-register
+      if (messages === null) {
+        console.warn('Agent not registered with gateway, re-registering...');
+        try {
+          const result = await client.register();
+          console.log(`Re-registered: ${JSON.stringify(result)}`);
+        } catch (err) {
+          console.warn(`Re-registration failed: ${err}`);
+        }
+        return;
+      }
       for (const msg of messages) {
         console.log(`[${msg.from_user}] ${msg.text}`);
         try {

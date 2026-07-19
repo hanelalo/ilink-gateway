@@ -59,12 +59,12 @@ describe('GatewayClient', () => {
       expect(result).toEqual(messages);
     });
 
-    it('should return empty array on 404', async () => {
+    it('should return null on 404', async () => {
       mockFetch(404, { error: 'Agent not found' });
 
       const client = new GatewayClient(BASE, 'claude');
       const result = await client.poll();
-      expect(result).toEqual([]);
+      expect(result).toBeNull();
     });
 
     it('should return empty array when messages field is missing', async () => {

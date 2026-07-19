@@ -278,7 +278,33 @@ async fn main() -> Result<()> {
                                             agent, ref_id
                                         );
                                         match router_guard.route_to_agent(&msg, agent, Some(context_json.clone())) {
-                                            Ok(()) => true,
+                                            Ok(()) => {
+                                                // 记录消息上下文，供 agent 回复时查找 context_token/to_user
+                                                if let Some(msg_id) = msg.message_id.clone().map(|id| id.to_string()) {
+                                                    if let (Some(ctx), Some(user)) = (
+                                                        msg.context_token.clone(),
+                                                        msg.from_user_id.clone(),
+                                                    ) {
+                                                        let preview = msg
+                                                            .text()
+                                                            .unwrap_or("")
+                                                            .chars()
+                                                            .take(80)
+                                                            .collect::<String>();
+                                                        message_contexts.lock().unwrap().insert(
+                                                            msg_id,
+                                                            MessageContextInfo {
+                                                                context_token: ctx,
+                                                                to_user: user,
+                                                                received_at: Instant::now(),
+                                                                message_preview: preview,
+                                                                agent_name: agent.to_string(),
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                                true
+                                            }
                                             Err(e) => {
                                                 tracing::warn!("route_to_agent error: {e}");
                                                 false
