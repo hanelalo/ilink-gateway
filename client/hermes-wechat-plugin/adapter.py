@@ -598,6 +598,8 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         if not media_paths:
             text = self._ensure_header(text)
         segments = _split_content(text, CONTENT_MAX_LENGTH)
+        if not segments:
+            segments = [""]
 
         async def _send_one(content: str) -> SendResult:
             url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
@@ -630,6 +632,8 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         if not media_paths:
             text = self._ensure_header(text)
         segments = _split_content(text, CONTENT_MAX_LENGTH)
+        if not segments:
+            segments = [""]
 
         async def _send_one(content: str) -> SendResult:
             url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
