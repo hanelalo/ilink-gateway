@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -26,6 +26,8 @@ from gateway.platforms.base import (
     SendResult,
     MessageEvent,
     MessageType,
+    safe_url_for_log,
+    validate_media_delivery_path,
 )
 from gateway.config import Platform
 
@@ -313,14 +315,139 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send a reply back through the gateway API."""
+        media_paths = (metadata or {}).get("media_paths") or []
         if reply_to:
-            return await self._send_reply(reply_to, content)
+            return await self._send_reply(reply_to, content, media_paths=media_paths)
         # Proactive send (pairing code, notifications): use chat_id as from_user
-        return await self._send_proactive(chat_id, content)
+        return await self._send_proactive(chat_id, content, media_paths=media_paths)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic chat info."""
         return {"name": chat_id, "type": "dm"}
+
+    # ── Media send overrides ─────────────────────────────────────────
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file through the gateway as native WeChat media."""
+        validated = validate_media_delivery_path(image_path)
+        if not validated:
+            logger.warning("[%s] send_image_file: unsafe path %s", self.name, image_path)
+            text = "⚠️ 无法发送图片附件。"
+            if caption:
+                text = f"{caption}\n{text}"
+            return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
+        final_meta: dict = dict(metadata or {})
+        final_meta["media_paths"] = [validated]
+        return await self.send(chat_id=chat_id, content=caption or "", reply_to=reply_to, metadata=final_meta)
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an image from URL — download to cache first, then send as native media."""
+        from gateway.platforms.base import cache_image_from_url
+        try:
+            local_path = await cache_image_from_url(image_url)
+        except Exception as e:
+            logger.warning("[%s] send_image: failed to cache %s: %s", self.name, safe_url_for_log(image_url), e)
+            return await super().send_image(chat_id, image_url, caption, reply_to, metadata)
+        return await self.send_image_file(chat_id, local_path, caption, reply_to, metadata)
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a voice message through the gateway as native WeChat media."""
+        validated = validate_media_delivery_path(audio_path)
+        if not validated:
+            logger.warning("[%s] send_voice: unsafe path %s", self.name, audio_path)
+            text = "⚠️ 无法发送语音附件。"
+            if caption:
+                text = f"{caption}\n{text}"
+            return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
+        final_meta: dict = dict(metadata or {})
+        final_meta["media_paths"] = [validated]
+        return await self.send(chat_id=chat_id, content=caption or "", reply_to=reply_to, metadata=final_meta)
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a video through the gateway as native WeChat media."""
+        validated = validate_media_delivery_path(video_path)
+        if not validated:
+            logger.warning("[%s] send_video: unsafe path %s", self.name, video_path)
+            text = "⚠️ 无法发送视频附件。"
+            if caption:
+                text = f"{caption}\n{text}"
+            return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
+        final_meta: dict = dict(metadata or {})
+        final_meta["media_paths"] = [validated]
+        return await self.send(chat_id=chat_id, content=caption or "", reply_to=reply_to, metadata=final_meta)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a document through the gateway as native WeChat media."""
+        validated = validate_media_delivery_path(file_path)
+        if not validated:
+            logger.warning("[%s] send_document: unsafe path %s", self.name, file_path)
+            warn = f"⚠️ 无法发送附件{' (' + file_name + ')' if file_name else ''}。"
+            text = f"{caption}\n{warn}" if caption else warn
+            return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
+        final_meta: dict = dict(metadata or {})
+        final_meta["media_paths"] = [validated]
+        content = caption or file_name or ""
+        return await self.send(chat_id=chat_id, content=content, reply_to=reply_to, metadata=final_meta)
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        images: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        """Send multiple images — download each URL to cache and send sequentially."""
+        for i, (image_url, alt_text) in enumerate(images):
+            if human_delay > 0 and i > 0:
+                await asyncio.sleep(human_delay)
+            try:
+                if image_url.startswith("file://"):
+                    from urllib.parse import unquote as _unquote
+                    await self.send_image_file(chat_id, _unquote(image_url[7:]), alt_text, metadata=metadata)
+                else:
+                    await self.send_image(chat_id, image_url, alt_text, metadata=metadata)
+            except Exception as e:
+                logger.error("[%s] send_multiple_images item %d: %s", self.name, i, e)
 
     # ── Internal: Register ──────────────────────────────────────────────
 
@@ -462,7 +589,7 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
 
     # ── Internal: Proactive send ──────────────────────────────────────────
 
-    async def _send_proactive(self, chat_id: str, text: str) -> SendResult:
+    async def _send_proactive(self, chat_id: str, text: str, media_paths: Optional[list[str]] = None) -> SendResult:
         """POST /api/agents/{name}/reply with to_user for proactive sends.
 
         Used for pairing codes, notifications, etc. where there is no
@@ -473,10 +600,10 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
 
         async def _send_one(content: str) -> SendResult:
             url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
-            body = {
+            body: dict[str, Any] = {
                 "reply_to_id": "",
                 "text": content,
-                "media_paths": [],
+                "media_paths": media_paths or [],
                 "to_user": chat_id,
                 "context_token": "",
             }
@@ -497,17 +624,17 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
 
     # ── Internal: Send reply ────────────────────────────────────────────
 
-    async def _send_reply(self, reply_to_id: str, text: str) -> SendResult:
+    async def _send_reply(self, reply_to_id: str, text: str, media_paths: Optional[list[str]] = None) -> SendResult:
         """POST /api/agents/{name}/reply with the response."""
         text = self._ensure_header(text)
         segments = _split_content(text, CONTENT_MAX_LENGTH)
 
         async def _send_one(content: str) -> SendResult:
             url = f"{self.gateway_url}/api/agents/{self.agent_name}/reply"
-            body = {
+            body: dict[str, Any] = {
                 "reply_to_id": reply_to_id,
                 "text": content,
-                "media_paths": [],
+                "media_paths": media_paths or [],
                 "agent_context": json.dumps({"agent": self.agent_name}),
             }
             try:
