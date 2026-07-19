@@ -55,6 +55,7 @@ export async function startClaudeSession(
         cwd: opts.cwd,
         abortController: opts.abortController,
         model: config.model,
+        effort: config.effort,
         allowedTools: opts.approvedTools && opts.approvedTools.length > 0 ? opts.approvedTools : undefined,
         permissionMode: opts.permissionMode,
         resume: opts.resumeSessionId,
