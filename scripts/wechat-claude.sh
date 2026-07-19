@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # wechat-claude — Claude Code adapter for WeChat gateway
 #
-# This is a shell wrapper that launches the adapter via Bun directly,
-# without requiring Node.js. We use bun run instead of bun build --compile
-# because --compile has a segfault bug on macOS (oven-sh/bun#26843).
+# This is a standalone binary compiled by Bun (scripts/build.sh). It does
+# NOT require Node.js, npm, or any runtime dependencies.
 set -euo pipefail
 
-SCRIPT="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
-ROOT="$(dirname "$(dirname "$SCRIPT")")"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Remove log files from previous calendar days (cross-platform, no cron needed)
 LOG_DIR="$HOME/.wechat-gateway"
@@ -20,4 +18,4 @@ for logfile in "$LOG_DIR"/*.log; do
   fi
 done
 
-exec /Users/hanelalo/.bun/bin/bun run "$ROOT/client/claude-code-adapter/src/index.ts" "$@"
+exec "$ROOT/target/release/wechat-claude" "$@"

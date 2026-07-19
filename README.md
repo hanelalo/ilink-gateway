@@ -62,7 +62,7 @@ wechat-gateway/
 │   ├── plugin.yaml          # Plugin metadata
 │   └── __init__.py          # Exports register() entry point
 │
-├── client/claude-code-adapter/  # Claude Code adapter (Node.js/TypeScript → wechat-claude binary)
+├── client/claude-code-adapter/  # Claude Code adapter (Node.js/TypeScript → wechat-claude)
 │   └── src/
 │       ├── index.ts             # Entry: register → poll loop → message routing
 │       ├── claude-session.ts    # Claude SDK query() wrapper
@@ -76,8 +76,8 @@ wechat-gateway/
 │       └── config.ts            # Env config loader
 │
 ├── scripts/
-│   ├── build.sh                 # Build all binaries (gateway + wechat-claude)
-│   └── wechat-claude.sh         # Shell wrapper to launch claude-adapter via bun run
+│   ├── build.sh                 # Build gateway Rust binary
+│   └── wechat-claude.sh         # Shell wrapper: launch claude-adapter via bun run
 │
 └── docs/
 ```
@@ -136,7 +136,7 @@ cd wechat-gateway
 export HTTP_PROXY=http://127.0.0.1:7897
 export HTTPS_PROXY=http://127.0.0.1:7897
 
-# Build everything (gateway + claude-adapter binary)
+# Build everything (gateway Rust binary only)
 ./scripts/build.sh
 
 # Run — scan the QR code in terminal to log in
@@ -337,19 +337,14 @@ Hermes sends the pairing code back through the gateway to you on WeChat. After p
 The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. It runs via Bun without requiring Node.js:
 
 ```bash
-# Build (included in scripts/build.sh):
+# Build gateway
 ./scripts/build.sh
-
-# Or build just the adapter manually:
-cd client/claude-code-adapter
-npm install
-bun build --compile --target=bun --outfile=../../target/release/wechat-claude src/index.ts
 
 # Run
 ./target/release/wechat-claude
 ```
 
-> **Note**: You can also use `scripts/wechat-claude.sh` as a launch entry point, which runs `bun run` directly (avoids the Bun `--compile` segfault bug on macOS). A symlink `wechat-claude` to this script is available at `~/.local/bin/wechat-claude`.
+> **Note**: Use `scripts/wechat-claude.sh` as the launch entry point — it handles log cleanup and points to the compiled binary at `target/release/wechat-claude`. A symlink at `~/.local/bin/wechat-claude` is also available.
 
 The adapter registers itself as `claude` agent with the gateway. Switch between agents from WeChat:
 
