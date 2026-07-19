@@ -240,6 +240,11 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Debug: log raw message JSON for protocol probing (引用回复参考)
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    tracing::info!("raw message: {json}");
+                }
+
                 // Dedup: skip messages we've already processed (message_id + content MD5, 5 min TTL)
                 let key = dedup_key(&msg);
                 if !dedup.lock().unwrap().check_and_record(&key) {
@@ -670,6 +675,7 @@ async fn resilient_send(
                 let errcode = resp.errcode.unwrap_or(0);
                 if errcode == 0 {
                     breaker.lock().unwrap().record_success();
+                    tracing::info!("sendmessage response: {resp:?}");
                     return Ok(());
                 }
                 if errcode == -2 {

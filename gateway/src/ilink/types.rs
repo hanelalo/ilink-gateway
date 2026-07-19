@@ -440,6 +440,9 @@ pub struct SendMessageResponse {
     #[allow(dead_code)]
     #[serde(default)]
     pub context_token: Option<String>,
+    /// Catch unknown fields for protocol probing.
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
 }
 
 // ── SendTyping ───────────────────────────────────────────────────────────────
