@@ -62,7 +62,7 @@ wechat-gateway/
 │   ├── plugin.yaml          # Plugin metadata
 │   └── __init__.py          # Exports register() entry point
 │
-├── client/claude-code-adapter/  # Claude Code adapter (Node.js/TypeScript)
+├── client/claude-code-adapter/  # Claude Code adapter (Node.js/TypeScript → wechat-claude binary)
 │   └── src/
 │       ├── index.ts             # Entry: register → poll loop → message routing
 │       ├── claude-session.ts    # Claude SDK query() wrapper
@@ -74,6 +74,9 @@ wechat-gateway/
 │       ├── formatter.ts         # Markdown → plain text
 │       ├── streaming-batcher.ts # Stream batching, idle alert, long reply split
 │       └── config.ts            # Env config loader
+│
+├── scripts/
+│   └── build.sh                 # Build all binaries (gateway + wechat-claude)
 │
 └── docs/
 ```
@@ -132,10 +135,17 @@ cd wechat-gateway
 export HTTP_PROXY=http://127.0.0.1:7897
 export HTTPS_PROXY=http://127.0.0.1:7897
 
-# Build
-cargo build --release
+# Build everything (gateway + claude-adapter binary)
+./scripts/build.sh
 
 # Run — scan the QR code in terminal to log in
+./target/release/wechat-gateway
+```
+
+Or build just the gateway:
+
+```bash
+cargo build --release
 ./target/release/wechat-gateway
 ```
 
@@ -204,13 +214,54 @@ Check status:
 launchctl list com.wechat-gateway
 ```
 
+#### Run Claude Adapter as a Background Service
+
+Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` as a persistent daemon:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wechat-claude</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/wechat-gateway/target/release/wechat-claude</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/youruser/.wechat-gateway/claude-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/youruser/.wechat-gateway/claude-stderr.log</string>
+</dict>
+</plist>
+```
+
 #### Updating after Code Changes
 
 ```bash
-cd /path/to/wechat-gateway
-cargo build --release
+# Build everything
+./scripts/build.sh
+
+# Restart gateway (no re-scan required)
 launchctl unload ~/Library/LaunchAgents/com.wechat-gateway.plist
 launchctl load ~/Library/LaunchAgents/com.wechat-gateway.plist
+
+# Restart claude adapter (if using it)
+launchctl unload ~/Library/LaunchAgents/com.wechat-claude.plist
+launchctl load ~/Library/LaunchAgents/com.wechat-claude.plist
 ```
 
 Credentials are persisted in SQLite — no re-scan required.
@@ -271,16 +322,16 @@ Hermes sends the pairing code back through the gateway to you on WeChat. After p
 
 ### 5. Start the Claude Code Adapter (Alternative Agent)
 
-The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. To use it alongside or instead of Hermes:
+The Claude Code Adapter is a separate agent (Node.js/TypeScript) that connects to Claude Code instead of Hermes. After building, it runs as a standalone binary with no Node.js dependency:
 
 ```bash
+# Build (included in scripts/build.sh, or run separately):
 cd client/claude-code-adapter
-
-# Install dependencies
 npm install
+bun build --compile --target=bun --outfile=../../target/release/wechat-claude src/index.ts
 
 # Run
-npx tsx src/index.ts
+./target/release/wechat-claude
 ```
 
 The adapter registers itself as `claude` agent with the gateway. Switch between agents from WeChat:
