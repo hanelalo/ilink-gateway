@@ -96,7 +96,7 @@ export async function startClaudeSession(
           if (block.type === 'text') {
             opts.onAssistantText?.(block.text as string);
           } else if (block.type === 'tool_use') {
-            // canUseTool is handled by the SDK via options — no manual call needed here.
+            // canUseTool is handled by the SDK via options - no manual call needed here.
             continue;
           }
         }

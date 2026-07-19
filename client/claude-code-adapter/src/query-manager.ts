@@ -25,7 +25,7 @@ type WxidMap = Map<string, RunningQuery>;
 /**
  * Manages a 2-level map: wxid → cwd → RunningQuery.
  *
- * All methods are synchronous — the map is pure in-memory state.
+ * All methods are synchronous - the map is pure in-memory state.
  */
 export class QueryManager {
   /** wxid → { cwd → RunningQuery } */

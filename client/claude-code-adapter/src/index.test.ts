@@ -326,7 +326,7 @@ describe('index start', () => {
   it('should queue message when cwd has a running query', async () => {
     // Use a never-resolving promise so the first session never completes
     const firstSessionPromise = new Promise<{ sessionId: string; success: boolean }>(() => {
-      // Never resolve — keeps query "running"
+      // Never resolve - keeps query "running"
     });
 
     const sessionInvocations: Array<{ prompt: string }> = [];
@@ -352,7 +352,7 @@ describe('index start', () => {
     // Wait for the first message to start a session
     await waitForMock(startClaudeSession, 1);
 
-    // Now the first message is being processed — queryManager has an entry.
+    // Now the first message is being processed - queryManager has an entry.
     // The second message should arrive in the next poll and find a running query.
     // Wait for reply to "msg-2" saying it's queued.
     await waitForMock(mockReply, 1, 10000);
@@ -407,7 +407,7 @@ describe('index start', () => {
     // Now msg-2 arrives and should be queued (reply 已加入队列)
     await waitForMock(mockReply, 1, 10000);
 
-    // Resolve the first session — queued messages should now be replayed
+    // Resolve the first session - queued messages should now be replayed
     resolveFirstSession!({ sessionId: 'session-1', success: true });
 
     // Wait for the queued msg-2 to start a new session
@@ -485,7 +485,7 @@ describe('index start', () => {
   it('should support parallel sessions in different cwds', async () => {
     // Make startClaudeSession hold onto the first session
     const firstSessionPromise = new Promise<{ sessionId: string; success: boolean }>(() => {
-      // Never resolve — keeps query "running"
+      // Never resolve - keeps query "running"
     });
 
     let sessionCallCount = 0;
@@ -544,7 +544,7 @@ describe('index start', () => {
     // Wait for /cd switch to be processed
     await waitForMock(mockReply, 1);
 
-    // Wait for second session to start (project-b) — this should work even though
+    // Wait for second session to start (project-b) - this should work even though
     // project-a session is still running, since they're different cwds
     await waitForMock(startClaudeSession, 2, 10000);
 

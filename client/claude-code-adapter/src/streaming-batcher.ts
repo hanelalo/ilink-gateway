@@ -77,7 +77,7 @@ function splitMarkdownBlocks(text: string): string[] {
       continue;
     }
 
-    // Table row — keep consecutive | lines together
+    // Table row - keep consecutive | lines together
     if (TABLE_ROW_RE.test(trimmed)) {
       if (!inTable) {
         flush();

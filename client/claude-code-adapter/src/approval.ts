@@ -1,5 +1,5 @@
 /**
- * Tool approval module — parses WeChat approval commands, manages timeout promises,
+ * Tool approval module - parses WeChat approval commands, manages timeout promises,
  * and formats approval prompts for display in WeChat.
  */
 
@@ -11,11 +11,11 @@ export interface ParsedApprovalCommand {
  * Parse a WeChat message to determine if it is an approval command.
  *
  * Supported commands (case-insensitive):
- *   /approve          — approve the current tool call
- *   /deny             — deny the current tool call
- *   /approve session  — approve and remember the tool for this session
- *   /approve on       — switch to auto-approve mode
- *   /approve off      — switch to interactive approve mode
+ *   /approve          - approve the current tool call
+ *   /deny             - deny the current tool call
+ *   /approve session  - approve and remember the tool for this session
+ *   /approve on       - switch to auto-approve mode
+ *   /approve off      - switch to interactive approve mode
  *
  * Returns null when the text is not a recognized approval command.
  */

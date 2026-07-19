@@ -1,5 +1,5 @@
 /**
- * Claude Code Adapter — main entry point.
+ * Claude Code Adapter - main entry point.
  *
  * Lifecycle: register with gateway → poll loop → message routing
  *   → session management → Claude SDK query → reply
@@ -53,7 +53,7 @@ function formatReplyHeader(basename: string): string {
 }
 
 export async function start(): Promise<void> {
-  // T3.8: Global error handlers — catch unhandled rejections and exceptions
+  // T3.8: Global error handlers - catch unhandled rejections and exceptions
   // so the adapter loop always continues running.
   process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
@@ -176,23 +176,23 @@ export async function start(): Promise<void> {
         formatReplyHeader(basename),
         '',
         '客户端命令:',
-        '/cd             — 管理工作目录和别名',
-        '/cd <target>    — 切换到指定目录或别名',
-        '/cd + <n> <p>   — 添加别名',
-        '/cd - <n>       — 删除别名',
-        '/close <target> — 关闭指定工作区',
-        '/approve        — 批准当前工具调用',
-        '/deny           — 拒绝当前工具调用',
-        '/approve session— 批准并记住当前工具',
-        '/approve on     — 开启自动审批模式',
-        '/approve off    — 关闭自动审批模式',
-        '/agent-help     — 显示此帮助',
-        '/help           — 显示此帮助',
+        '/cd             - 管理工作目录和别名',
+        '/cd <target>    - 切换到指定目录或别名',
+        '/cd + <n> <p>   - 添加别名',
+        '/cd - <n>       - 删除别名',
+        '/close <target> - 关闭指定工作区',
+        '/approve        - 批准当前工具调用',
+        '/deny           - 拒绝当前工具调用',
+        '/approve session- 批准并记住当前工具',
+        '/approve on     - 开启自动审批模式',
+        '/approve off    - 关闭自动审批模式',
+        '/agent-help     - 显示此帮助',
+        '/help           - 显示此帮助',
       ].join('\n'), undefined, agentContext);
       return;
     }
 
-    // /close command — close workspace (top-level shortcut for /cd close)
+    // /close command - close workspace (top-level shortcut for /cd close)
     if (/^\/close\b/.test(text)) {
       const user = ensureUser(wxid);
       const parts = text.trim().split(/\s+/);
@@ -368,7 +368,7 @@ export async function start(): Promise<void> {
       },
     );
 
-    // Start Claude session (fire and forget — result is handled inside)
+    // Start Claude session (fire and forget - result is handled inside)
     startClaudeSession({
       cwd,
       prompt: text,
@@ -479,7 +479,7 @@ export async function start(): Promise<void> {
     const user = ensureUser(wxid);
     const parts = text.trim().split(/\s+/);
 
-    // /cd — list status
+    // /cd - list status
     if (parts.length === 1) {
       return formatStatus(user);
     }
@@ -505,16 +505,16 @@ export async function start(): Promise<void> {
       return removeAlias(user, aliasName, persistSessions);
     }
 
-    // /cd <target> — switch workspace
+    // /cd <target> - switch workspace
     return switchCwd(user, target, persistSessions);
   }
 
-  // Poll loop (T3.9: self-healing — poll errors are caught, logged, and retried on next interval)
+  // Poll loop (T3.9: self-healing - poll errors are caught, logged, and retried on next interval)
   const poll = async () => {
     if (!running) return;
     try {
       const messages = await client.poll();
-      // null means 404 — agent not registered, re-register
+      // null means 404 - agent not registered, re-register
       if (messages === null) {
         console.warn('Agent not registered with gateway, re-registering...');
         try {
@@ -535,7 +535,7 @@ export async function start(): Promise<void> {
       }
     } catch (err) {
       if (!running) return;
-      // T3.9: Poll error is caught here — the poll loop simply skips this iteration
+      // T3.9: Poll error is caught here - the poll loop simply skips this iteration
       // and will retry on the next interval. This provides automatic self-healing
       // for transient network issues or gateway restarts.
       console.warn(`Poll error: ${err}`);

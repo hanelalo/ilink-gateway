@@ -46,7 +46,7 @@ export function resolvePath(session: UserSessionData, target: string): string {
     return fuzzyMatch;
   }
 
-  // 4. Absolute path — validate existence
+  // 4. Absolute path - validate existence
   if (target.startsWith('/') || target.startsWith('~')) {
     const expanded = target.startsWith('~')
       ? target.replace(/^~/, os.homedir())
