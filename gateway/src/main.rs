@@ -162,9 +162,10 @@ async fn main() -> Result<()> {
         let reply_tickets = typing_ticket_cache.clone();
         let reply_breaker = send_breaker.clone();
         let reply_router = router_arc.clone();
+        let reply_store = store_arc.clone();
         let mut rx = reply_rx;
         tokio::spawn(async move {
-            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, reply_tickets, reply_breaker, &mut rx).await;
+            handle_agent_replies(reply_client, reply_token, reply_router, reply_ctx, reply_tickets, reply_breaker, reply_store, &mut rx).await;
         })
     };
 
@@ -240,15 +241,69 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // Debug: log raw message JSON for protocol probing (引用回复参考)
+                // Debug: log raw message JSON for protocol probing
                 if let Ok(json) = serde_json::to_string(&msg) {
-                    tracing::info!("raw message: {json}");
+                    tracing::trace!("raw message: {json}");
                 }
 
                 // Dedup: skip messages we've already processed (message_id + content MD5, 5 min TTL)
                 let key = dedup_key(&msg);
                 if !dedup.lock().unwrap().check_and_record(&key) {
                     tracing::debug!("skipping duplicate message {key}");
+                    continue;
+                }
+
+                // 识别引用回复 → 路由到目标 agent
+                let ref_routed = {
+                    let item_list = msg.item_list.as_ref();
+                    let ref_msg_id = item_list
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.ref_msg.as_ref())
+                        .map(|ref_msg| ref_msg.message_item.msg_id.clone());
+
+                    if let Some(ref_id) = ref_msg_id {
+                        // 缩小 store 锁范围，避免与 router 锁形成死锁
+                        let context_json = store_arc.lock().unwrap().get_msg_agent_context(&ref_id).unwrap_or(None);
+                        // store_guard 在这里自动 drop
+
+                        if let Some(context_json) = context_json {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&context_json) {
+                                if let Some(agent) = parsed.get("agent").and_then(|v| v.as_str()) {
+                                    let mut router_guard = router_arc.lock().unwrap();
+                                    if router_guard.registry().contains(agent) {
+                                        tracing::info!(
+                                            "reference reply: routing to agent '{}' (ref_msg_id={})",
+                                            agent, ref_id
+                                        );
+                                        match router_guard.route_to_agent(&msg, agent, Some(context_json)) {
+                                            Ok(()) => true,
+                                            Err(e) => {
+                                                tracing::warn!("route_to_agent error: {e}");
+                                                false
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!("reference reply: target agent '{}' not registered", agent);
+                                        false
+                                    }
+                                } else {
+                                    tracing::warn!("reference reply: agent_context missing 'agent' field: {context_json}");
+                                    false
+                                }
+                            } else {
+                                tracing::warn!("reference reply: failed to parse agent_context JSON: {context_json}");
+                                false
+                            }
+                        } else {
+                            tracing::debug!("reference reply: no context found for ref_msg_id={}", ref_id);
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if ref_routed {
                     continue;
                 }
 
@@ -285,12 +340,9 @@ async fn main() -> Result<()> {
                                 base_info: None,
                             };
 
-                            if let Err(e) =
+                            let _ =
                                 resilient_send(&client, &current_token, send_req, &send_breaker)
-                                    .await
-                            {
-                                tracing::warn!("send_message error: {e}");
-                            }
+                                    .await;
                         },
                     )
                     .await;
@@ -651,14 +703,14 @@ fn dedup_key(msg: &WeixinMessage) -> String {
 /// retries), errcode=-14 context_token-stripping fallback, and circuit
 /// breaker integration.
 ///
-/// Returns `Ok(())` on success (errcode 0), or the first unrecoverable
-/// error.  Records success/failure to the shared breaker.
+/// Returns `Ok(Some(msg_id))` on success (errcode 0) with the message id,
+/// or the first unrecoverable error.  Records success/failure to the shared breaker.
 async fn resilient_send(
     client: &IlinkClient,
     token: &str,
     mut req: SendMessageRequest,
     breaker: &SharedBreaker,
-) -> std::result::Result<(), GatewayError> {
+) -> std::result::Result<Option<String>, GatewayError> {
     {
         let b = breaker.lock().unwrap();
         if b.is_open() {
@@ -676,7 +728,8 @@ async fn resilient_send(
                 if errcode == 0 {
                     breaker.lock().unwrap().record_success();
                     tracing::info!("sendmessage response: {resp:?}");
-                    return Ok(());
+                    let msg_id = resp.message_id.map(|id| id.to_string());
+                    return Ok(msg_id);
                 }
                 if errcode == -2 {
                     tracing::warn!(
@@ -725,6 +778,7 @@ async fn handle_agent_replies(
     contexts: Arc<Mutex<HashMap<String, MessageContextInfo>>>,
     ticket_cache: TypingTicketCache,
     breaker: SharedBreaker,
+    store: Arc<Mutex<SqliteStore>>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentReply>,
 ) {
     while let Some(reply) = rx.recv().await {
@@ -780,8 +834,16 @@ async fn handle_agent_replies(
                     msg: reply_msg,
                     base_info: None,
                 };
-                if let Err(e) = resilient_send(&client, &token, req, &breaker).await {
-                    tracing::error!("failed to send text reply: {e}");
+                match resilient_send(&client, &token, req, &breaker).await {
+                    Ok(Some(msg_id)) => {
+                        if let Some(ref ctx) = reply.agent_context {
+                            if let Err(e) = store.lock().unwrap().save_msg_agent_context(&msg_id, ctx) {
+                                tracing::warn!("failed to save msg agent context: {e}");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("failed to send text reply: {e}"),
                 }
             })
             .await;
@@ -807,8 +869,16 @@ async fn handle_agent_replies(
                             msg: reply_msg,
                             base_info: None,
                         };
-                        if let Err(e) = resilient_send(&client, &token, req, &breaker).await {
-                            tracing::error!("failed to send media reply: {e}");
+                        match resilient_send(&client, &token, req, &breaker).await {
+                            Ok(Some(msg_id)) => {
+                                if let Some(ref ctx) = reply.agent_context {
+                                    if let Err(e) = store.lock().unwrap().save_msg_agent_context(&msg_id, ctx) {
+                                        tracing::warn!("failed to save msg agent context: {e}");
+                                    }
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("failed to send media reply: {e}"),
                         }
                     }
                     Err(e) => {
@@ -823,8 +893,16 @@ async fn handle_agent_replies(
                             msg: reply_msg,
                             base_info: None,
                         };
-                        if let Err(e2) = resilient_send(&client, &token, req, &breaker).await {
-                            tracing::error!("failed to send fallback message: {e2}");
+                        match resilient_send(&client, &token, req, &breaker).await {
+                            Ok(Some(msg_id)) => {
+                                if let Some(ref ctx) = reply.agent_context {
+                                    if let Err(e) = store.lock().unwrap().save_msg_agent_context(&msg_id, ctx) {
+                                        tracing::warn!("failed to save msg agent context: {e}");
+                                    }
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!("failed to send media fallback reply: {e}"),
                         }
                     }
                 }
@@ -843,8 +921,16 @@ async fn handle_agent_replies(
                     msg: reply_msg,
                     base_info: None,
                 };
-                if let Err(e) = resilient_send(&client, &token, req, &breaker).await {
-                    tracing::error!("failed to send additional file note: {e}");
+                match resilient_send(&client, &token, req, &breaker).await {
+                    Ok(Some(msg_id)) => {
+                        if let Some(ref ctx) = reply.agent_context {
+                            if let Err(e) = store.lock().unwrap().save_msg_agent_context(&msg_id, ctx) {
+                                tracing::warn!("failed to save msg agent context: {e}");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("failed to send extra file note: {e}"),
                 }
             }
         }
@@ -1573,6 +1659,9 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
         )));
+        let store_file = tempfile::NamedTempFile::new().unwrap();
+        let test_store = SqliteStore::new(store_file.path().to_str().unwrap()).unwrap();
+        let test_store = Arc::new(Mutex::new(test_store));
         tokio::spawn(async move {
             handle_agent_replies(
                 client,
@@ -1581,6 +1670,7 @@ mod tests {
                 ctx_clone,
                 tickets,
                 breaker,
+                test_store,
                 &mut rx,
             )
             .await;
@@ -1593,6 +1683,7 @@ mod tests {
             media_paths: vec![],
             to_user: None,
             context_token: None,
+            agent_context: None,
         })
         .unwrap();
 
@@ -1668,9 +1759,12 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
         )));
+        let store_file = tempfile::NamedTempFile::new().unwrap();
+        let test_store2 = SqliteStore::new(store_file.path().to_str().unwrap()).unwrap();
+        let test_store2 = Arc::new(Mutex::new(test_store2));
 
         tokio::spawn(async move {
-            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, tickets, breaker, &mut rx)
+            handle_agent_replies(client, "test-token".to_string(), router, ctx_clone, tickets, breaker, test_store2, &mut rx)
                 .await;
         });
 
@@ -1681,6 +1775,7 @@ mod tests {
             media_paths: vec![media_path.to_string_lossy().to_string()],
             to_user: None,
             context_token: None,
+            agent_context: None,
         })
         .unwrap();
 

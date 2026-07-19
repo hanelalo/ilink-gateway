@@ -100,6 +100,10 @@ async fn handle_socket(socket: WebSocket, name: String, state: Arc<AppState>) {
                                 .get("context_token")
                                 .and_then(|v| v.as_str())
                                 .map(String::from),
+                            agent_context: reply
+                                .get("agent_context")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
                         };
                         // Forward the reply through the existing reply channel
                         let _ = state.reply_tx.send(agent_reply);

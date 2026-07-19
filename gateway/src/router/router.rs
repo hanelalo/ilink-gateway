@@ -180,10 +180,59 @@ impl Router {
             message_type: agent_msg.message_type,
             delivered: false,
             media,
+            agent_context: None,
         };
 
         self.queue.enqueue(active, queued)?;
         Ok(None)
+    }
+
+    /// 将消息路由到指定的 agent，绕过 active agent 检查。
+    ///
+    /// 用于引用回复路由场景：已知目标 agent，直接入队。
+    /// 会执行 admission policy 检查。
+    pub fn route_to_agent(
+        &mut self,
+        msg: &WeixinMessage,
+        agent_name: &str,
+        agent_context: Option<String>,
+    ) -> Result<()> {
+        // Admission policy check
+        let from_user = msg.from_user_id.as_deref().unwrap_or("");
+        let group_id = msg.group_id.as_deref().unwrap_or("");
+        if !group_id.is_empty() {
+            if !self.is_group_allowed(group_id) {
+                tracing::debug!("route_to_agent: group message from {group_id} dropped by group policy");
+                return Ok(());
+            }
+        } else if !self.is_dm_allowed(from_user) {
+            tracing::debug!("route_to_agent: DM from {from_user} dropped by dm policy");
+            return Ok(());
+        }
+
+        if !self.registry.contains(agent_name) {
+            return Err(GatewayError::AgentNotFound(agent_name.to_string()));
+        }
+
+        let agent_msg = Self::to_agent_message(msg).ok_or_else(|| {
+            GatewayError::Command("Failed to convert message for agent delivery".to_string())
+        })?;
+
+        let media = agent_msg.media.clone();
+        let queued = QueuedMessage {
+            id: agent_msg.id,
+            from_user: agent_msg.from_user,
+            text: agent_msg.text,
+            timestamp: agent_msg.timestamp,
+            context_token: agent_msg.context_token,
+            message_type: agent_msg.message_type,
+            delivered: false,
+            media,
+            agent_context,
+        };
+
+        self.queue.enqueue(agent_name, queued)?;
+        Ok(())
     }
 
     /// Handle a command message (starts with "/").
@@ -300,6 +349,7 @@ impl Router {
             context_token: msg.context_token.clone().unwrap_or_default(),
             message_type: message_type.to_string(),
             media,
+            agent_context: None,
         })
     }
 
@@ -553,7 +603,47 @@ mod tests {
             .unwrap();
     }
 
-    // ─── Tests ───────────────────────────────────────────────────────────────────
+    // ─── route_to_agent tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_route_to_agent_routes_to_specified_agent() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        register_agent(&mut router, "zeus");
+        let msg = make_text_msg("引用回复到 zeus");
+        router.route_to_agent(&msg, "zeus", Some(r#"{"agent":"hermes"}"#.to_string())).unwrap();
+        assert!(!router.queue().has_pending("hermes"));
+        assert!(router.queue().has_pending("zeus"));
+    }
+
+    #[test]
+    fn test_route_to_agent_unknown_agent_returns_error() {
+        let mut router = setup();
+        let msg = make_text_msg("hello");
+        let result = router.route_to_agent(&msg, "nobody", None);
+        assert!(result.is_err());
+        match result {
+            Err(GatewayError::AgentNotFound(name)) => assert_eq!(name, "nobody"),
+            _ => panic!("expected AgentNotFound"),
+        }
+    }
+
+    #[test]
+    fn test_route_to_agent_dm_policy_check() {
+        let mut router = setup();
+        register_agent(&mut router, "hermes");
+        router.set_policies(
+            DmPolicy::Disabled,
+            GroupPolicy::Disabled,
+            HashSet::new(),
+            HashSet::new(),
+        );
+        let msg = make_text_msg("hello");
+        router.route_to_agent(&msg, "hermes", None).unwrap();
+        assert!(!router.queue().has_pending("hermes"));
+    }
+
+    // ─── Tests ───────────────────────────────────────────────────────────────
 
     #[test]
     fn test_new_router_has_no_active_agent() {

@@ -133,11 +133,45 @@ export async function start(): Promise<void> {
     const wxid = msg.from_user;
     const text = msg.text.trim();
 
+    // ---- 0. 引用回复二次路由 ----
+    if (msg.agent_context) {
+      try {
+        const ctx = JSON.parse(msg.agent_context);
+        const targetWorkspace = ctx.workspace;
+        if (targetWorkspace) {
+          const user = ensureUser(wxid);
+          const currentBasename = path.basename(user.activeCwd || config.cwd);
+          if (targetWorkspace !== currentBasename) {
+            // 尝试通过别名查找完整路径
+            const aliasPath = user.aliases[targetWorkspace];
+            if (aliasPath) {
+              user.activeCwd = aliasPath;
+              console.log(`[引用回复] 已切换 workspace: ${currentBasename} → ${targetWorkspace}`);
+            } else {
+              // 没有别名，遍历所有 session 的 cwd 找 basename 匹配的
+              const match = Object.keys(user.sessions).find(
+                key => path.basename(key) === targetWorkspace
+              );
+              if (match) {
+                user.activeCwd = match;
+                console.log(`[引用回复] 已切换 workspace: ${currentBasename} → ${targetWorkspace}`);
+              } else {
+                console.log(`[引用回复] 无法找到 workspace: ${targetWorkspace}，使用当前 workspace`);
+              }
+            }
+          }
+        }
+      } catch {
+        // agent_context 解析失败，忽略
+      }
+    }
+
     // ---- 1. Global command interception ----
     // /agent-help command
     if (/^\/agent-help\b/.test(text) || /^\/help\b/.test(text)) {
       const user = ensureUser(wxid);
       const basename = path.basename(user.activeCwd || config.cwd);
+      const agentContext = JSON.stringify({ agent: config.agentName, workspace: basename });
       await client.reply(msg.id, [
         formatReplyHeader(basename),
         '',
@@ -154,7 +188,7 @@ export async function start(): Promise<void> {
         '/approve off    — 关闭自动审批模式',
         '/agent-help     — 显示此帮助',
         '/help           — 显示此帮助',
-      ].join('\n'));
+      ].join('\n'), undefined, agentContext);
       return;
     }
 
@@ -162,7 +196,9 @@ export async function start(): Promise<void> {
     if (/^\/cd\b/.test(text)) {
       const reply = handleCdCommand(wxid, text);
       if (reply) {
-        await client.reply(msg.id, reply);
+        const cdBasename = path.basename(ensureUser(wxid).activeCwd || config.cwd);
+        const agentContext = JSON.stringify({ agent: config.agentName, workspace: cdBasename });
+        await client.reply(msg.id, reply, undefined, agentContext);
       }
       return;
     }
@@ -176,7 +212,7 @@ export async function start(): Promise<void> {
         formatReplyHeader(path.basename(cwd || config.cwd)),
         '',
         '还没有工作目录，请先使用 /cd 命令切换到一个目录。',
-      ].join('\n'));
+      ].join('\n'), undefined, JSON.stringify({ agent: config.agentName, workspace: path.basename(cwd || config.cwd) }));
       return;
     }
 
@@ -193,7 +229,7 @@ export async function start(): Promise<void> {
           formatReplyHeader(basename),
           '',
           '已切换为自动审批模式',
-        ].join('\n'));
+        ].join('\n'), undefined, JSON.stringify({ agent: config.agentName, workspace: basename }));
         return;
       }
 
@@ -203,7 +239,7 @@ export async function start(): Promise<void> {
           formatReplyHeader(basename),
           '',
           '已切换为交互审批模式',
-        ].join('\n'));
+        ].join('\n'), undefined, JSON.stringify({ agent: config.agentName, workspace: basename }));
         return;
       }
 
@@ -233,7 +269,7 @@ export async function start(): Promise<void> {
           formatReplyHeader(basename),
           '',
           '当前没有待审批的操作',
-        ].join('\n'));
+        ].join('\n'), undefined, JSON.stringify({ agent: config.agentName, workspace: basename }));
       }
       return;
     }
@@ -247,12 +283,13 @@ export async function start(): Promise<void> {
         formatReplyHeader(basename),
         '',
         '上一个请求仍在处理中，已加入队列',
-      ].join('\n'));
+      ].join('\n'), undefined, JSON.stringify({ agent: config.agentName, workspace: basename }));
       return;
     }
 
     // ---- 4. Start a new Claude session ----
     const basename = path.basename(cwd);
+    const agentContext = JSON.stringify({ agent: config.agentName, workspace: basename });
 
     // Ensure session entry exists
     if (!user.sessions[cwd]) {
@@ -276,13 +313,13 @@ export async function start(): Promise<void> {
           const segment = segments[i];
           if (i === 0) {
             // First segment gets the original reply
-            client.reply(msg.id, segment).catch((err) => {
+            client.reply(msg.id, segment, undefined, agentContext).catch((err) => {
               console.error('Failed to flush reply:', err);
             });
           } else {
             // Continuation segments: delay 500ms between segments (T3.6)
             setTimeout(() => {
-              client.reply(msg.id, segment).catch((err) => {
+              client.reply(msg.id, segment, undefined, agentContext).catch((err) => {
                 console.error('Failed to send continuation:', err);
               });
             }, i * 500);
@@ -295,7 +332,7 @@ export async function start(): Promise<void> {
           formatReplyHeader(basename),
           '',
           'Claude 正在处理中...',
-        ].join('\n')).catch((err) => {
+        ].join('\n'), undefined, agentContext).catch((err) => {
           console.error('Failed to send idle notification:', err);
         });
       },
@@ -339,7 +376,7 @@ export async function start(): Promise<void> {
 
         // Notify user about pending approval with real tool input
         const approvalMsg = formatApprovalPrompt(basename, toolName, input);
-        client.reply(msg.id, approvalMsg).catch((err) => {
+        client.reply(msg.id, approvalMsg, undefined, agentContext).catch((err) => {
           console.error('Failed to send approval prompt:', err);
         });
 
@@ -399,6 +436,7 @@ export async function start(): Promise<void> {
         context_token: '',
         message_type: 'text',
         media: [],
+        agent_context: undefined,
       };
       await handleMessage(fakeMsg);
     }

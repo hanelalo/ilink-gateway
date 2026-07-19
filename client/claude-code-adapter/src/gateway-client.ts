@@ -12,6 +12,7 @@ export interface AgentMessage {
   context_token: string;
   message_type: string;
   media: MediaItem[];
+  agent_context?: string;
 }
 
 export interface PollResponse {
@@ -82,13 +83,16 @@ export class GatewayClient {
     return data.messages ?? [];
   }
 
-  async reply(replyToId: string, text: string, mediaPaths?: string[]): Promise<boolean> {
+  async reply(replyToId: string, text: string, mediaPaths?: string[], agentContext?: string): Promise<boolean> {
     const body: Record<string, unknown> = {
       reply_to_id: replyToId,
       text,
     };
     if (mediaPaths && mediaPaths.length > 0) {
       body.media_paths = mediaPaths;
+    }
+    if (agentContext) {
+      body.agent_context = agentContext;
     }
     const res = await this.request(`${this.baseUrl}/api/agents/${this.agentName}/reply`, {
       method: 'POST',

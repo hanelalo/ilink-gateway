@@ -109,6 +109,7 @@ fn make_msg(id: &str, text: &str) -> QueuedMessage {
         message_type: "text".to_string(),
         delivered: false,
         media: vec![],
+        agent_context: None,
     }
 }
 

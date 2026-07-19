@@ -184,6 +184,8 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-cd',
       expect.stringContaining('所有 workspace'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     // Should NOT start a Claude session for a /cd command
@@ -227,10 +229,14 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-switch',
       expect.stringContaining('已切换到'),
+      undefined,
+      expect.stringContaining('agent'),
     );
     expect(mockReply).toHaveBeenCalledWith(
       'msg-switch',
       expect.stringContaining('project-a'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     // /cd switches should persist sessions
@@ -254,6 +260,8 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-ap',
       expect.stringContaining('没有待审批的操作'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     process.emit('SIGINT', 'SIGINT');
@@ -274,6 +282,8 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-on',
       expect.stringContaining('自动审批'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     process.emit('SIGINT', 'SIGINT');
@@ -593,6 +603,8 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-deny',
       expect.stringContaining('没有待审批'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     process.emit('SIGINT', 'SIGINT');
@@ -627,6 +639,8 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-cd-alias',
       expect.stringContaining('已添加别名'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     process.emit('SIGINT', 'SIGINT');
@@ -672,6 +686,8 @@ describe('index start', () => {
     expect(mockReply).toHaveBeenCalledWith(
       'msg-close',
       expect.stringContaining('已关闭 workspace'),
+      undefined,
+      expect.stringContaining('agent'),
     );
 
     process.emit('SIGINT', 'SIGINT');

@@ -225,6 +225,16 @@ pub struct VideoItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RefMsgItem {
+    pub msg_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RefMsg {
+    pub message_item: RefMsgItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MessageItem {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub item_type: Option<i32>,
@@ -238,6 +248,8 @@ pub struct MessageItem {
     pub file_item: Option<FileItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_item: Option<VideoItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_msg: Option<RefMsg>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
@@ -440,6 +452,9 @@ pub struct SendMessageResponse {
     #[allow(dead_code)]
     #[serde(default)]
     pub context_token: Option<String>,
+    /// Message ID assigned by iLink for this sent message.
+    #[serde(default)]
+    pub message_id: Option<i64>,
     /// Catch unknown fields for protocol probing.
     #[serde(flatten)]
     pub extra: serde_json::Value,
@@ -501,6 +516,11 @@ pub struct AgentMessage {
     pub message_type: String, // "text" | "image" | "voice" | "file"
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media: Vec<MediaItem>,
+    /// JSON string from the original agent's reply context.
+    /// Non-empty when this message is a reference reply; the receiving agent
+    /// can use it for secondary routing (e.g. claude adapter routes to workspace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<String>,
 }
 
 /// An agent's reply to a WeChat message.
@@ -522,6 +542,10 @@ pub struct AgentReply {
     /// Optional context_token for proactive sends. Defaults to "" if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_token: Option<String>,
+    /// JSON string containing routing context (e.g. {"agent":"claude","workspace":"my-project"}).
+    /// Set by agents when replying, stored by gateway for reference-reply routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<String>,
 }
 
 /// Status of a registered agent.
@@ -556,6 +580,7 @@ pub struct QueuedMessage {
     #[allow(dead_code)]
     pub delivered: bool,
     pub media: Vec<MediaItem>,
+    pub agent_context: Option<String>,
 }
 
 /// Router command types.
@@ -665,6 +690,7 @@ mod tests {
             context_token: "token-abc".to_string(),
             message_type: "text".to_string(),
             media: vec![],
+            agent_context: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: AgentMessage = serde_json::from_str(&json).unwrap();
@@ -681,6 +707,7 @@ mod tests {
             media_paths: vec![],
             to_user: None,
             context_token: None,
+            agent_context: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         let deserialized: AgentReply = serde_json::from_str(&json).unwrap();
@@ -703,6 +730,7 @@ mod tests {
                 local_path: "/tmp/cache/abc.jpg".to_string(),
                 original_name: None,
             }],
+            agent_context: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("media"));
@@ -722,6 +750,7 @@ mod tests {
             context_token: "token-abc".to_string(),
             message_type: "text".to_string(),
             media: vec![],
+            agent_context: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         // media field should not appear in JSON when empty
@@ -736,6 +765,7 @@ mod tests {
             media_paths: vec!["/tmp/file.pdf".to_string()],
             to_user: None,
             context_token: None,
+            agent_context: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(json.contains("media_paths"));
@@ -752,6 +782,7 @@ mod tests {
             media_paths: vec![],
             to_user: None,
             context_token: None,
+            agent_context: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(!json.contains("media_paths"));
@@ -765,6 +796,7 @@ mod tests {
             media_paths: vec![],
             to_user: Some("wx_user_id".to_string()),
             context_token: Some(String::new()),
+            agent_context: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(json.contains("to_user"));
@@ -772,6 +804,7 @@ mod tests {
         let deserialized: AgentReply = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.to_user.as_deref(), Some("wx_user_id"));
         assert!(deserialized.context_token.is_some());
+        assert!(deserialized.agent_context.is_none());
     }
 
     #[test]

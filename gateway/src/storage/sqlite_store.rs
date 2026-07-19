@@ -49,6 +49,11 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS gateway_state (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS msg_agent_context (
+                msg_id      TEXT PRIMARY KEY,
+                context     TEXT NOT NULL,
+                created_at  INTEGER NOT NULL
             )",
         )
         .map_err(|e| GatewayError::Storage(format!("Failed to create schema: {e}")))?;
@@ -115,6 +120,9 @@ impl SqliteStore {
 
     // ─── Gateway state ─────────────────────────────────────────────
 
+    /// 最多保留的 msg_agent_context 记录数。
+    const MSG_AGENT_CONTEXT_MAX: usize = 200;
+
     /// Get a gateway state value by key.
     pub fn get_state(&self, key: &str) -> Result<Option<String>> {
         let mut stmt = self
@@ -150,6 +158,54 @@ impl SqliteStore {
             .execute("DELETE FROM gateway_state WHERE key = ?1", rusqlite::params![key])
             .map_err(|e| GatewayError::Storage(format!("Failed to delete state '{}': {}", key, e)))?;
         Ok(())
+    }
+
+    /// 保存 msg_id → agent_context 映射，最多保留 MSG_AGENT_CONTEXT_MAX 条。
+    /// 超过上限时删除最旧的一条。
+    pub fn save_msg_agent_context(&self, msg_id: &str, context: &str) -> Result<()> {
+        // 1. INSERT OR REPLACE
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO msg_agent_context (msg_id, context, created_at) VALUES (?1, ?2, UNIXEPOCH())",
+                rusqlite::params![msg_id, context],
+            )
+            .map_err(|e| GatewayError::Storage(format!("Failed to save msg agent context: {e}")))?;
+
+        // 2. 检查行数，超过上限则删除最早的一条
+        let count: i64 = self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM msg_agent_context",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| GatewayError::Storage(format!("Failed to count msg agent context: {e}")))?;
+
+        if count as usize >= Self::MSG_AGENT_CONTEXT_MAX {
+            self.conn
+                .execute(
+                    "DELETE FROM msg_agent_context WHERE msg_id = (SELECT msg_id FROM msg_agent_context ORDER BY created_at ASC, rowid ASC LIMIT 1)",
+                    [],
+                )
+                .map_err(|e| GatewayError::Storage(format!("Failed to trim msg agent context: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    /// 根据 msg_id 查询 agent_context。
+    pub fn get_msg_agent_context(&self, msg_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT context FROM msg_agent_context WHERE msg_id = ?1")
+            .map_err(|e| GatewayError::Storage(format!("Failed to prepare msg context query: {e}")))?;
+
+        match stmt.query_row(rusqlite::params![msg_id], |row| row.get(0)) {
+            Ok(ctx) => Ok(Some(ctx)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(GatewayError::Storage(format!(
+                "Failed to query msg agent context: {e}"
+            ))),
+        }
     }
 }
 
@@ -251,5 +307,59 @@ mod tests {
         let creds = store.load_credentials().unwrap().unwrap();
         assert_eq!(creds.account_id, "acct-x");
         assert_eq!(creds.token, "tok-x");
+    }
+
+    #[test]
+    fn test_save_and_get_msg_agent_context() {
+        let file = NamedTempFile::new().unwrap();
+        let store = SqliteStore::new(file.path().to_str().unwrap()).unwrap();
+        store.save_msg_agent_context("7484409538682029960", r#"{"agent":"claude"}"#).unwrap();
+        let result = store.get_msg_agent_context("7484409538682029960").unwrap();
+        assert_eq!(result.unwrap(), r#"{"agent":"claude"}"#);
+    }
+
+    #[test]
+    fn test_get_msg_agent_context_not_found() {
+        let file = NamedTempFile::new().unwrap();
+        let store = SqliteStore::new(file.path().to_str().unwrap()).unwrap();
+        let result = store.get_msg_agent_context("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_msg_agent_context_update_existing() {
+        let file = NamedTempFile::new().unwrap();
+        let store = SqliteStore::new(file.path().to_str().unwrap()).unwrap();
+        store.save_msg_agent_context("msg-1", r#"{"agent":"old"}"#).unwrap();
+        store.save_msg_agent_context("msg-1", r#"{"agent":"new"}"#).unwrap();
+        let result = store.get_msg_agent_context("msg-1").unwrap().unwrap();
+        assert_eq!(result, r#"{"agent":"new"}"#);
+    }
+
+    #[test]
+    fn test_msg_agent_context_max_limit() {
+        let file = NamedTempFile::new().unwrap();
+        let store = SqliteStore::new(file.path().to_str().unwrap()).unwrap();
+        for i in 0..200 {
+            store.save_msg_agent_context(&format!("msg-{i}"), r#"{"agent":"test"}"#).unwrap();
+        }
+        store.save_msg_agent_context("msg-200", r#"{"agent":"new"}"#).unwrap();
+        assert!(store.get_msg_agent_context("msg-0").unwrap().is_none());
+        assert_eq!(
+            store.get_msg_agent_context("msg-200").unwrap().unwrap(),
+            r#"{"agent":"new"}"#
+        );
+    }
+
+    #[test]
+    fn test_msg_agent_context_schema_created() {
+        let file = NamedTempFile::new().unwrap();
+        SqliteStore::new(file.path().to_str().unwrap()).unwrap();
+        let conn = Connection::open(file.path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='msg_agent_context'")
+            .unwrap();
+        let table_name: String = stmt.query_row([], |row| row.get(0)).unwrap();
+        assert_eq!(table_name, "msg_agent_context");
     }
 }

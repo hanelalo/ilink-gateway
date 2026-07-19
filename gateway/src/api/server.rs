@@ -47,6 +47,9 @@ pub struct ReplyRequest {
     /// Optional context_token for proactive sends.
     #[serde(default)]
     pub context_token: Option<String>,
+    /// JSON string routing context to associate with the sent message.
+    #[serde(default)]
+    pub agent_context: Option<String>,
 }
 
 // ─── Application state ──────────────────────────────────────────────────────
@@ -182,6 +185,7 @@ pub async fn handle_poll(
                 "context_token": m.context_token,
                 "message_type": m.message_type,
                 "media": media,
+                "agent_context": m.agent_context,
             })
         })
         .collect();
@@ -208,6 +212,7 @@ pub async fn handle_reply(
         media_paths: body.media_paths,
         to_user: body.to_user,
         context_token: body.context_token,
+        agent_context: body.agent_context,
     };
     if state.reply_tx.send(reply).is_err() {
         tracing::warn!("reply channel closed, dropping reply");
