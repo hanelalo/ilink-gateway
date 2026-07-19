@@ -29,6 +29,35 @@ export interface StartClaudeSessionOptions {
  *
  * Returns the session ID obtained from the init message and a success flag.
  */
+
+/**
+ * Find the local Claude Code CLI binary.  Checks in order:
+ * 1. CLAUDE_BINARY_PATH env var (explicit path to the claude binary)
+ * 2. CLAUDE_CODE_EXECPATH env var (directory — appends /claude)
+ * 3. `which claude` via PATH
+ */
+function findClaudeBinary(): string {
+  // 1. Explicit binary path from env
+  const explicit = process.env.CLAUDE_BINARY_PATH;
+  if (explicit) return explicit;
+
+  // 2. Directory from CLAUDE_CODE_EXECPATH
+  const dir = process.env.CLAUDE_CODE_EXECPATH;
+  if (dir) {
+    try { const s = require('node:fs').statSync(dir); if (s.isDirectory()) return dir + '/claude'; } catch {}
+    return dir;
+  }
+
+  // 3. which claude
+  try {
+    const { execFileSync } = require('node:child_process');
+    const p = execFileSync('which', ['claude'], { encoding: 'utf8' }).trim();
+    if (p) return p;
+  } catch {}
+
+  return '';
+}
+
 export async function startClaudeSession(
   opts: StartClaudeSessionOptions,
 ): Promise<{ sessionId: string; success: boolean }> {
@@ -56,6 +85,7 @@ export async function startClaudeSession(
         abortController: opts.abortController,
         model: config.model,
         effort: config.effort,
+        pathToClaudeCodeExecutable: findClaudeBinary(),
         allowedTools: opts.approvedTools && opts.approvedTools.length > 0 ? opts.approvedTools : undefined,
         permissionMode: opts.permissionMode,
         resume: opts.resumeSessionId,

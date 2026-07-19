@@ -248,6 +248,8 @@ Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` a
         <string>high</string>
         <key>CLAUDE_CWD</key>
         <string>/Users/youruser</string>
+        <key>CLAUDE_BINARY_PATH</key>
+        <string>/Users/youruser/.local/bin/claude</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -264,6 +266,8 @@ Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` a
 </dict>
 </plist>
 ```
+
+`CLAUDE_BINARY_PATH` is required when running as a launchd daemon — point it to the location of your `claude` CLI binary. Without it, the adapter won't be able to find Claude Code in launchd's minimal PATH environment.
 
 #### Updating after Code Changes
 
@@ -343,7 +347,7 @@ The Claude Code Adapter is a separate agent that connects to Claude Code instead
 # Build everything
 ./scripts/build.sh
 
-# Run
+# Run (finds claude via PATH or CLAUDE_BINARY_PATH env var)
 ./target/release/wechat-claude
 ```
 
