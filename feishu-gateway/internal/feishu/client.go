@@ -150,6 +150,40 @@ func (c *Client) UploadImage(ctx context.Context, path string) (string, error) {
 	return "", nil
 }
 
+// UploadFile uploads a non-image file and returns the file_key.
+func (c *Client) UploadFile(ctx context.Context, path string) (string, error) {
+	if err := c.gate(); err != nil {
+		return "", err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	fileType := FileTypeForPath(path)
+	req := larkim.NewCreateFileReqBuilder().
+		Body(larkim.NewCreateFileReqBodyBuilder().
+			FileType(fileType).
+			FileName(filepath.Base(path)).
+			File(f).
+			Build()).
+		Build()
+	resp, err := c.lark.Im.V1.File.Create(ctx, req)
+	if err != nil {
+		c.mark(false)
+		return "", err
+	}
+	if !resp.Success() {
+		c.mark(false)
+		return "", fmt.Errorf("feishu upload file: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	c.mark(true)
+	if resp.Data != nil && resp.Data.FileKey != nil {
+		return *resp.Data.FileKey, nil
+	}
+	return "", nil
+}
+
 // DownloadResource downloads a message resource (image/file) to destPath.
 // resourceType is "image" or "file".
 func (c *Client) DownloadResource(ctx context.Context, messageID, fileKey, resourceType, destPath string) error {

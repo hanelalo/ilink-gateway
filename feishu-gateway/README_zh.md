@@ -140,7 +140,7 @@ WECHAT_GATEWAY_URL=http://127.0.0.1:8765 ...
 
 ### 路线图
 
-1. 非图片媒体的文件上传（目前仅图片上传可用）
+1. ~~非图片媒体的文件上传~~ ✅ 已完成
 2. Hermes 插件飞书 fork（解耦 `wechat_gateway` 平台身份）
 3. 真实飞书集成测试（需用户提供 `app_id` / `app_secret`）
 

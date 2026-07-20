@@ -74,8 +74,15 @@ func (p *Processor) handle(ctx context.Context, reply model.AgentReply) {
 				log.Printf("send image %s: %v", path, err)
 			}
 		} else {
-			// File upload not yet wired in client.go — log and skip.
-			log.Printf("skip non-image media (file upload not yet supported): %s", path)
+			key, err := p.feishu.UploadFile(ctx, path)
+			if err != nil {
+				log.Printf("upload file %s: %v", path, err)
+				continue
+			}
+			content, _ := json.Marshal(map[string]string{"file_key": key})
+			if _, err := p.send(ctx, replyToID, receiveIDType, receiveID, "file", string(content)); err != nil {
+				log.Printf("send file %s: %v", path, err)
+			}
 		}
 	}
 }

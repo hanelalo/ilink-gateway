@@ -151,7 +151,7 @@ WECHAT_GATEWAY_URL=http://127.0.0.1:8765 ...
 
 ### Roadmap
 
-1. File upload for non-image media (image upload already supported)
+1. ~~File upload for non-image media~~ ✅ Done
 2. Hermes plugin Feishu fork (decouples `wechat_gateway` platform identity)
 3. Real Feishu integration test (requires `app_id` / `app_secret` from the user)
 
