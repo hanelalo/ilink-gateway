@@ -87,28 +87,33 @@ client = Client.builder() \
 ### 方式 1：WebSocket 长连接（推荐，不需要公网 URL）
 
 ```python
-from lark_oapi.ws import Client as WSClient
-from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
+import lark_oapi as lark
 
-# 1. 定义事件处理器
-def handle_message(event):
-    print(event)
+# 1. 定义事件处理器（v2.0 事件用 register_p2_xxx）
+def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
+    print(data)
 
-handler = EventDispatcherHandler.builder() \
-    .register("im.message.receive_v1", handle_message) \
+event_handler = lark.EventDispatcherHandler.builder("", "") \
+    .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
     .build()
 
-# 2. 启动 WebSocket
-ws = WSClient(
-    app_id="cli_xxx",
-    app_secret="xxx",
-    event_handler=handler,
-    # extra_ua_tags=["channel"]  # 需要群聊 @提及事件时必须加
+# 2. 启动 WebSocket 长连接
+ws = lark.ws.Client(
+    "cli_xxx",
+    "xxx",
+    event_handler=event_handler,
+    log_level=lark.LogLevel.DEBUG,
 )
 ws.start()
 ```
 
-**⚠️ 重要**：群聊 @提及事件只有在 WebSocket 连接带 `extra_ua_tags=["channel"]` 时才会推送。不加则只能收到 DM 消息。
+**群聊 @机器人事件能否收到**，取决于三件事：①后台「事件与回调」订阅了 `im.message.receive_v1`；②订阅方式选「使用长连接接收事件」并保存（保存时本地 client **必须已在线**，否则保存失败）；③机器人被拉进群且有 `im:message` 权限。与 User-Agent / `extra_ua_tags` 等参数无关。
+
+**长连接限制**：
+- 仅支持**企业自建应用**，商店应用必须用 Webhook
+- 每应用最多 **50 个**长连接
+- 收到消息后必须在 **3 秒**内处理完成（不抛异常），否则触发超时重推
+- **集群模式**：同一 app_id 多个 client 只有**随机一个**收到消息，不是广播也不是重复
 
 ### 方式 2：Webhook 回调
 
@@ -129,7 +134,12 @@ Content-Type: application/json
 }
 ```
 
-**Webhook 验签流程**：飞书会先发一个 URL 验证请求（challenge），你需要在 1 秒内解密 challenge 并返回。过程涉及 encryption key + AES 解密，需要配置 `FEISHU_VERIFICATION_TOKEN` 和 `FEISHU_ENCRYPT_KEY`。
+**Webhook 验签流程**：飞书会先发一个 URL 验证请求（challenge），你解密后原样返回 `challenge` 字段即可通过验证。分两种模式：
+
+- **明文模式**（未配置 Encrypt Key）：用 `Verification Token` 校验请求来源（header 中的 token 字段）
+- **加密模式**（配置了 Encrypt Key）：请求体经 **AES-256-CBC** 加密（key = `SHA256(Encrypt Key)`），解密后取出 `challenge` 原样返回
+
+需要配置 `FEISHU_VERIFICATION_TOKEN` 和 `FEISHU_ENCRYPT_KEY`。challenge 验证与事件回调一样要求秒级响应，超时会重试。
 
 ### 事件类型
 
@@ -218,6 +228,7 @@ post 富文本元素：
 
 ```
 POST https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply
+Authorization: Bearer t-xxx
 Content-Type: application/json
 
 {
@@ -371,7 +382,7 @@ def is_bot_mentioned(mentions, bot_open_id, bot_user_id=None, bot_name=None):
     return False
 ```
 
-**⚠️ 重要**：群聊 @提及事件只有在 WebSocket 连接带 `extra_ua_tags=["channel"]` 时才会推送。
+**⚠️ 提醒**：`mentions[].id` 里通常只可靠地包含 `open_id`，`user_id` / `union_id` 可能为空——优先用 `open_id` 匹配，其余两路作 fallback。事件能否推送见上文「接收消息」部分。
 
 ---
 
@@ -436,8 +447,8 @@ response.card = CallBackCard({"config": {...}, "elements": [...]})
 
 | Scope | 用途 | 必需？ |
 |-------|------|:---:|
-| `im:message` | 获取与发送消息 | ✅ |
-| `im:message:send_as_bot` | 以机器人身份发送消息 | ✅ |
+| `im:message:send_as_bot` | 以机器人身份**发送**消息 | ✅ 发消息必需 |
+| `im:message` | 读取用户发给机器人的消息内容（配合事件订阅） | ✅ 收消息必需 |
 | `im:resource` | 上传/下载图片和文件 | 按需 |
 | `contact:user.employee_id:readonly` | 读取员工工号 | 按需 |
 | `contact:user.base:readonly` | 读取用户基本信息（姓名等） | 按需 |
@@ -471,11 +482,13 @@ response.card = CallBackCard({"config": {...}, "elements": [...]})
 | **WebSocket 断开残留** | 断开时要发 CLOSE 帧，否则飞书服务端 CLOSE-WAIT 可能持续几分钟到几小时 |
 | **token 过期** | 7200s，不要在临界点刷新，建议提前 60-120s |
 | **Webhook URL 验证** | 必须在 1 秒内返回解密后的 challenge |
-| **同 app_id 多连接** | 同一 app_id 同时只能有一个长连接，多个会导致消息重复 |
+| **同 app_id 多连接（集群模式）** | 多个 client 只有**随机一个**收到消息（不是重复推送）；每应用最多 50 个连接 |
 | **消息重复** | 飞书可能推送重复消息，需要基于 `message_id` 做去重 |
 | **回复已撤回消息** | 回复被撤回消息会失败，需要 fallback 到发送新消息 |
 | **文件上传 file_type** | 不同扩展名对应不同 `file_type`，用错会导致上传失败（如 .opus 必须用 `opus` 而不是 `stream`） |
 | **图片消息裁剪** | 图片默认 800px 宽，通过 `/im/v1/images` 上传时支持设置 `width`/`height` |
+| **发消息频率限制** | 单应用发消息有 QPS 上限（详见后台「频率限制」），批量发送会触发 429，需客户端限流 |
+| **消息体大小** | `post` 富文本约 30KB 上限（`text` 类型上限更大），长输出需分片发送 |
 
 ---
 
