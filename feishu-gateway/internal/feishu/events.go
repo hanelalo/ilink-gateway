@@ -117,10 +117,11 @@ func normalizeContent(msgType, content string) (text, mappedType string, mediaKe
 
 	case "file":
 		var c struct {
-			FileKey string `json:"file_key"`
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
 		}
 		_ = json.Unmarshal([]byte(content), &c)
-		return "", "file", []model.MediaKey{{Kind: "file", Key: c.FileKey}}
+		return "", "file", []model.MediaKey{{Kind: "file", Key: c.FileKey, Name: c.FileName}}
 
 	case "audio":
 		var c struct {

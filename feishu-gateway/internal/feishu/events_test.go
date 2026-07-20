@@ -86,6 +86,25 @@ func TestNormalizeImage(t *testing.T) {
 	}
 }
 
+func TestNormalizeFile(t *testing.T) {
+	ev := makeTextEvent("", "p2p")
+	ev.Event.Message.MessageType = ptr("file")
+	ev.Event.Message.Content = ptr(`{"file_key":"file_abc","file_name":"report.pdf"}`)
+	msg, _, ok := NormalizeEvent(ev, "ou_bot")
+	if !ok {
+		t.Fatal("ok expected")
+	}
+	if msg.MessageType != "file" {
+		t.Errorf("type=%q", msg.MessageType)
+	}
+	if len(msg.MediaKeys) != 1 || msg.MediaKeys[0].Kind != "file" || msg.MediaKeys[0].Key != "file_abc" {
+		t.Errorf("mediakeys=%+v", msg.MediaKeys)
+	}
+	if msg.MediaKeys[0].Name != "report.pdf" {
+		t.Errorf("expected file_name=report.pdf, got %q", msg.MediaKeys[0].Name)
+	}
+}
+
 func TestNormalizeAudioMappedToVoice(t *testing.T) {
 	ev := makeTextEvent("", "p2p")
 	ev.Event.Message.MessageType = ptr("audio")

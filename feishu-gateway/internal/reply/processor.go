@@ -12,17 +12,26 @@ import (
 	"github.com/hanelalo/wechat-gateway/feishu-gateway/internal/storage"
 )
 
+// feishuClient is the subset of feishu.Client that Processor needs. Defined as
+// an interface so tests can supply a fake.
+type feishuClient interface {
+	ReplyMessage(ctx context.Context, messageID, msgType, content string) (string, error)
+	SendMessage(ctx context.Context, receiveIDType, receiveID, msgType, content string) (string, error)
+	UploadImage(ctx context.Context, path string) (string, error)
+	UploadFile(ctx context.Context, path string) (string, error)
+}
+
 // Processor consumes AgentReply values from the reply channel and dispatches
 // them to feishu. Single goroutine — avoids hitting the feishu QPS limit and
 // keeps reply ordering deterministic per message.
 type Processor struct {
 	replyCh <-chan model.AgentReply
-	feishu  *feishu.Client
+	feishu  feishuClient
 	msgCtxs *msgctx.Store
 	store   storage.Store
 }
 
-func New(replyCh <-chan model.AgentReply, fc *feishu.Client, msgCtxs *msgctx.Store, store storage.Store) *Processor {
+func New(replyCh <-chan model.AgentReply, fc feishuClient, msgCtxs *msgctx.Store, store storage.Store) *Processor {
 	return &Processor{replyCh: replyCh, feishu: fc, msgCtxs: msgCtxs, store: store}
 }
 

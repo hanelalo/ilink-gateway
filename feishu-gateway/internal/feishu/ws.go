@@ -180,6 +180,10 @@ func (w *WSClient) downloadMediaAsync(msg model.IncomingMessage, agentName strin
 			MediaType: mapMediaKind(k.Kind),
 			LocalPath: dest,
 		})
+		if k.Name != "" {
+			name := k.Name
+			items[len(items)-1].OriginalName = &name
+		}
 	}
 	if len(items) > 0 && !w.cfg.Router.UpdateLastMedia(agentName, items) {
 		log.Printf("media backfill: no queued message for agent %q (already polled?)", agentName)

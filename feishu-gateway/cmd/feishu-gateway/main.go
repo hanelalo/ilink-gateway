@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -77,7 +78,7 @@ func main() {
 	defer stop()
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() { defer wg.Done(); proc.Run(ctx) }()
 	go func() {
 		defer wg.Done()
@@ -86,6 +87,10 @@ func main() {
 	go func() {
 		defer wg.Done()
 		runMsgCtxCleanup(ctx, msgCtxs, 5*time.Minute, 10*time.Minute)
+	}()
+	go func() {
+		defer wg.Done()
+		runMediaCacheCleanup(ctx, cfg.MediaCacheDir, cfg.MediaCacheMaxAgeDays)
 	}()
 
 	go func() {
@@ -143,6 +148,51 @@ func runMsgCtxCleanup(ctx context.Context, s *msgctx.Store, interval, maxAge tim
 		case <-ticker.C:
 			if n := s.Cleanup(maxAge); n > 0 {
 				log.Printf("msgctx cleanup: evicted %d entries", n)
+			}
+		}
+	}
+}
+
+func runMediaCacheCleanup(ctx context.Context, mediaCacheDir string, maxAgeDays int) {
+	if maxAgeDays <= 0 {
+		return
+	}
+	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			entries, err := os.ReadDir(mediaCacheDir)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("media cache cleanup: read dir %q: %v", mediaCacheDir, err)
+				}
+				continue
+			}
+			now := time.Now()
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				name := entry.Name()
+				if len(name) != 10 || name[4] != '-' || name[7] != '-' {
+					continue
+				}
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				if now.Sub(info.ModTime()) > maxAge {
+					path := filepath.Join(mediaCacheDir, name)
+					if err := os.RemoveAll(path); err != nil {
+						log.Printf("media cache cleanup: remove %q: %v", path, err)
+					} else {
+						log.Printf("media cache cleanup: removed expired directory %q", path)
+					}
+				}
 			}
 		}
 	}

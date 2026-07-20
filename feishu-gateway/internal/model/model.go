@@ -116,6 +116,7 @@ type RouterCommand struct {
 type MediaKey struct {
 	Kind string // "image" | "file" | "audio" | "media"
 	Key  string
+	Name string // original file name (from feishu file message content)
 }
 
 // IncomingMessage is the platform-agnostic representation of a message
