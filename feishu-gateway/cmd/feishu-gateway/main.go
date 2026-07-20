@@ -31,7 +31,15 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	store := storage.NewInMemory()
+	store, err := storage.NewSQLite(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("open sqlite store %q: %v", cfg.DBPath, err)
+	}
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			log.Printf("store close: %v", cerr)
+		}
+	}()
 	reg := agent.NewRegistry()
 	queue := agent.NewMessageQueue()
 	state := router.NewState(cfg, reg, queue)

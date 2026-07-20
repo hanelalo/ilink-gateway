@@ -14,16 +14,16 @@ WeChat to Feishu.
 | Agent registry + queue + heartbeat | ✅ Working |
 | Router (admission / commands / routing) | ✅ Working |
 | Dedup cache + circuit breaker | ✅ Working |
-| In-memory state store | ✅ Working |
+| In-memory state store (for tests) | ✅ Working |
 | Feishu WebSocket receiver | ✅ Working |
 | Feishu client (send / upload / download) | ✅ Working |
 | Reply processor (real send) | ✅ Working |
 | Media download / cache | ✅ Working |
-| SQLite persistent store | ⏳ In-memory (pending `modernc.org/sqlite`) |
+| SQLite persistent store | ✅ Working (`modernc.org/sqlite`, pure-Go) |
 
 The HTTP layer is fully functional today: agents can register, poll, reply, and
 query status. The Feishu backend (WebSocket event ingestion + message sending)
-is the remaining work and requires building against Go ≥ 1.20.
+requires valid `GW_FEISHU_APP_ID` / `GW_FEISHU_APP_SECRET`.
 
 ## Architecture
 
@@ -39,20 +39,19 @@ feishu-gateway/
     ├── storage/             # Store interface + in-memory impl
     ├── dedup/               # TTL dedup cache
     ├── breaker/             # Sliding-window circuit breaker
-    ├── feishu/              # Feishu SDK integration (pending Go upgrade)
-    └── reply/               # Reply processor (pending Feishu client)
+    ├── feishu/              # Feishu SDK integration
+    └── reply/               # Reply processor (consumes reply channel → Feishu)
 ```
 
 **Concurrency model**: each concern runs in its own goroutine — heartbeat
-checker, HTTP server, (future) Feishu WS receiver, (future) reply processor.
-Shared state uses short, non-nested mutex critical sections to avoid
-lock-ordering deadlocks.
+checker, HTTP server, Feishu WS receiver, reply processor. Shared state uses
+short, non-nested mutex critical sections to avoid lock-ordering deadlocks.
 
 ## Quick start
 
 ### Prerequisites
 
-- Go ≥ 1.19 for the current code; Go ≥ 1.20 once the Feishu SDK is wired in
+- Go ≥ 1.25 (the `modernc.org/sqlite` driver requires it)
 
 ### Build & run
 
@@ -83,7 +82,7 @@ All config is via `GW_*` environment variables.
 |----------|---------|---------|
 | `GW_HTTP_ADDR` | `127.0.0.1` | HTTP API bind address |
 | `GW_HTTP_PORT` | `8765` | HTTP API port |
-| `GW_DB_PATH` | `~/.feishu-gateway/data.db` | SQLite path (pending Go upgrade) |
+| `GW_DB_PATH` | `~/.feishu-gateway/data.db` | SQLite path (schema created on first open) |
 | `GW_CMD_TIMEOUT` | `30` | `/cmd` default timeout (seconds) |
 | `GW_CMD_MAX_OUTPUT` | `2000` | `/cmd` output truncation (chars) |
 | `GW_DM_POLICY` | `open` | DM admission: `disabled` / `pairing` / `allowlist` / `open` |
@@ -150,15 +149,11 @@ CLAUDE_GATEWAY_URL=http://127.0.0.1:8765 CLAUDE_GATEWAY_AGENT_NAME=claude \
 WECHAT_GATEWAY_URL=http://127.0.0.1:8765 ...
 ```
 
-### Roadmap (post Go-upgrade)
+### Roadmap
 
-1. Wire `github.com/larksuite/oapi-sdk-go/v3` WebSocket long connection
-2. Feishu client (send message, reply, upload image/file, download resource)
-3. Event normalization (type mapping, @-mention cleanup, post rich-text extraction)
-4. Real reply processor with resilient send + circuit breaker
-5. Async media download + cache
-6. SQLite persistent store (`modernc.org/sqlite`)
-7. Hermes plugin Feishu fork (decouples `wechat_gateway` platform identity)
+1. File upload for non-image media (image upload already supported)
+2. Hermes plugin Feishu fork (decouples `wechat_gateway` platform identity)
+3. Real Feishu integration test (requires `app_id` / `app_secret` from the user)
 
 See `/Users/hanelalo/.claude/plans/go-gleaming-wolf.md` for the full design.
 

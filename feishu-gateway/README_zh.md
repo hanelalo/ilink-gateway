@@ -10,14 +10,14 @@
 | Agent registry + queue + 心跳 | ✅ 可用 |
 | Router（准入 / 命令 / 路由） | ✅ 可用 |
 | 去重缓存 + 熔断器 | ✅ 可用 |
-| 内存版状态存储 | ✅ 可用 |
+| 内存版状态存储（测试用） | ✅ 可用 |
 | 飞书 WebSocket 接收 | ✅ 可用 |
 | 飞书 client（发消息 / 上传 / 下载） | ✅ 可用 |
 | Reply processor（真实发送） | ✅ 可用 |
 | 媒体下载 / 缓存 | ✅ 可用 |
-| SQLite 持久化存储 | ⏳ 内存版（待接 `modernc.org/sqlite`） |
+| SQLite 持久化存储 | ✅ 可用（`modernc.org/sqlite`，纯 Go） |
 
-HTTP 层今天已完全可用：agent 可以注册、轮询、回复、查询状态。飞书后端（WebSocket 事件接收 + 发消息）是剩余工作，需要 Go ≥ 1.20 编译。
+HTTP 层今天已完全可用：agent 可以注册、轮询、回复、查询状态。飞书后端（WebSocket 事件接收 + 发消息）需要有效的 `GW_FEISHU_APP_ID` / `GW_FEISHU_APP_SECRET`。
 
 ## 架构
 
@@ -33,17 +33,17 @@ feishu-gateway/
     ├── storage/             # Store 接口 + 内存实现
     ├── dedup/               # TTL 去重缓存
     ├── breaker/             # 滑动窗口熔断器
-    ├── feishu/              # 飞书 SDK 集成（待升级 Go）
-    └── reply/               # Reply processor（待飞书 client）
+    ├── feishu/              # 飞书 SDK 集成
+    └── reply/               # Reply processor（消费 reply channel → 飞书发消息）
 ```
 
-**并发模型**：每个关注点跑在独立 goroutine —— 心跳检查、HTTP server、（未来）飞书 WS 接收、（未来）reply processor。共享状态用短而互不嵌套的互斥临界区，避免锁顺序死锁。
+**并发模型**：每个关注点跑在独立 goroutine —— 心跳检查、HTTP server、飞书 WS 接收、reply processor。共享状态用短而互不嵌套的互斥临界区，避免锁顺序死锁。
 
 ## 快速开始
 
 ### 前置条件
 
-- 当前代码需 Go ≥ 1.19；接入飞书 SDK 后需 Go ≥ 1.20
+- Go ≥ 1.25（`modernc.org/sqlite` 驱动的要求）
 
 ### 构建与运行
 
@@ -74,7 +74,7 @@ make test-verbose  # 带每个测试输出
 |------|--------|------|
 | `GW_HTTP_ADDR` | `127.0.0.1` | HTTP API 绑定地址 |
 | `GW_HTTP_PORT` | `8765` | HTTP API 端口 |
-| `GW_DB_PATH` | `~/.feishu-gateway/data.db` | SQLite 路径（待升级 Go） |
+| `GW_DB_PATH` | `~/.feishu-gateway/data.db` | SQLite 路径（首次打开时自动建表） |
 | `GW_CMD_TIMEOUT` | `30` | `/cmd` 默认超时（秒） |
 | `GW_CMD_MAX_OUTPUT` | `2000` | `/cmd` 输出截断（字符） |
 | `GW_DM_POLICY` | `open` | DM 准入：`disabled` / `pairing` / `allowlist` / `open` |
@@ -138,15 +138,11 @@ CLAUDE_GATEWAY_URL=http://127.0.0.1:8765 CLAUDE_GATEWAY_AGENT_NAME=claude \
 WECHAT_GATEWAY_URL=http://127.0.0.1:8765 ...
 ```
 
-### 路线图（升级 Go 之后）
+### 路线图
 
-1. 接入 `github.com/larksuite/oapi-sdk-go/v3` WebSocket 长连接
-2. 飞书 client（发消息、回复、上传图片/文件、下载资源）
-3. 事件归一化（类型映射、@占位符清理、post 富文本提取）
-4. 真实 reply processor（resilient send + 熔断器）
-5. 异步媒体下载 + 缓存
-6. SQLite 持久化存储（`modernc.org/sqlite`）
-7. Hermes 插件飞书 fork（解耦 `wechat_gateway` 平台身份）
+1. 非图片媒体的文件上传（目前仅图片上传可用）
+2. Hermes 插件飞书 fork（解耦 `wechat_gateway` 平台身份）
+3. 真实飞书集成测试（需用户提供 `app_id` / `app_secret`）
 
 完整设计见 `/Users/hanelalo/.claude/plans/go-gleaming-wolf.md`。
 
