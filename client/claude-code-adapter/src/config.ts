@@ -8,6 +8,7 @@ export interface Config {
   pollIntervalMs: number;
   effort: string;
   sessionStorePath: string;
+  autoCompactWindow?: number;
   httpProxy?: string;
   httpsProxy?: string;
 }
@@ -23,7 +24,15 @@ export function loadConfig(): Config {
     sessionStorePath: envStr('CLAUDE_SESSION_STORE_PATH', os.homedir() + '/.wechat-gateway/claude-sessions.json'),
     httpProxy: envStrOrUndefined('HTTP_PROXY') ?? envStrOrUndefined('http_proxy'),
     httpsProxy: envStrOrUndefined('HTTPS_PROXY') ?? envStrOrUndefined('https_proxy'),
+    autoCompactWindow: envIntOrUndefined('CLAUDE_AUTO_COMPACT_WINDOW'),
   };
+}
+
+function envIntOrUndefined(name: string): number | undefined {
+  const v = process.env[name]?.trim();
+  if (!v) return undefined;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? undefined : n;
 }
 
 function envStr(name: string, fallback: string): string {

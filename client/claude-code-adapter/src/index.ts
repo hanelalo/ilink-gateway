@@ -453,6 +453,7 @@ export async function start(): Promise<void> {
       prompt: text,
       resumeSessionId: sessionEntry.sessionId ?? undefined,
       permissionMode: permissionModeMap.get(wxid) ?? 'default',
+      autoCompactWindow: config.autoCompactWindow,
       canUseTool: async (toolName, input) => {
         // Auto-approve when in bypassPermissions mode
         if (permissionModeMap.get(wxid) === 'bypassPermissions') {

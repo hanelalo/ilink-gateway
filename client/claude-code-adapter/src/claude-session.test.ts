@@ -466,4 +466,39 @@ describe('startClaudeSession', () => {
 
     expect(result.success).toBe(true);
   });
+
+  it('should pass autoCompactWindow to query options when set', async () => {
+    const gen = messageSequence([
+      systemInit('session-compact-1'),
+      resultSuccess('session-compact-1'),
+    ]);
+    vi.mocked(query).mockReturnValue(gen as unknown as ReturnType<typeof query>);
+
+    await startClaudeSession({
+      cwd: '/tmp',
+      prompt: 'test',
+      autoCompactWindow: 300000,
+      abortController: new AbortController(),
+    });
+
+    const queryCall = vi.mocked(query).mock.calls[0][0];
+    expect(queryCall.options?.settings).toEqual({ autoCompactWindow: 300000 });
+  });
+
+  it('should not pass settings when autoCompactWindow is undefined', async () => {
+    const gen = messageSequence([
+      systemInit('session-compact-2'),
+      resultSuccess('session-compact-2'),
+    ]);
+    vi.mocked(query).mockReturnValue(gen as unknown as ReturnType<typeof query>);
+
+    await startClaudeSession({
+      cwd: '/tmp',
+      prompt: 'test',
+      abortController: new AbortController(),
+    });
+
+    const queryCall = vi.mocked(query).mock.calls[0][0];
+    expect(queryCall.options?.settings).toBeUndefined();
+  });
 });

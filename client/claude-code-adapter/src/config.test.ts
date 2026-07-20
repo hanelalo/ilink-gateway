@@ -8,7 +8,7 @@ beforeEach(() => {
     'CLAUDE_GATEWAY_URL', 'CLAUDE_GATEWAY_AGENT_NAME', 'CLAUDE_MODEL',
     'CLAUDE_CWD', 'CLAUDE_POLL_INTERVAL', 'CLAUDE_EFFORT',
     'CLAUDE_SESSION_STORE_PATH', 'HTTP_PROXY', 'HTTPS_PROXY',
-    'http_proxy', 'https_proxy',
+    'http_proxy', 'https_proxy', 'CLAUDE_AUTO_COMPACT_WINDOW',
   ];
   for (const e of envs) {
     delete process.env[e];
@@ -23,7 +23,7 @@ describe('loadConfig', () => {
     expect(cfg.model).toBe('sonnet');
     expect(cfg.cwd).toBe(process.cwd());
     expect(cfg.pollIntervalMs).toBe(1000);
-    expect(cfg.effort).toBe('medium');
+    expect(cfg.effort).toBe('high');
     expect(cfg.sessionStorePath).toBe(os.homedir() + '/.wechat-gateway/claude-sessions.json');
   });
 
@@ -66,5 +66,22 @@ describe('loadConfig', () => {
     process.env.CLAUDE_POLL_INTERVAL = 'not-a-number';
     const cfg = loadConfig();
     expect(cfg.pollIntervalMs).toBe(1000);
+  });
+
+  it('should return undefined autoCompactWindow when not set', () => {
+    const cfg = loadConfig();
+    expect(cfg.autoCompactWindow).toBeUndefined();
+  });
+
+  it('should parse autoCompactWindow from env', () => {
+    process.env.CLAUDE_AUTO_COMPACT_WINDOW = '300000';
+    const cfg = loadConfig();
+    expect(cfg.autoCompactWindow).toBe(300000);
+  });
+
+  it('should return undefined autoCompactWindow for invalid input', () => {
+    process.env.CLAUDE_AUTO_COMPACT_WINDOW = 'not-a-number';
+    const cfg = loadConfig();
+    expect(cfg.autoCompactWindow).toBeUndefined();
   });
 });

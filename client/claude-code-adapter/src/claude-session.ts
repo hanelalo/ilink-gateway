@@ -11,6 +11,7 @@ export interface StartClaudeSessionOptions {
   resumeSessionId?: string;
   permissionMode?: 'default' | 'bypassPermissions';
   approvedTools?: string[];
+  autoCompactWindow?: number;
   canUseTool?: (toolName: string, input: unknown) => Promise<'allow' | 'deny'>;
   onAssistantText?: (text: string) => void;
   onSessionInit?: (sessionId: string) => void;
@@ -88,6 +89,7 @@ export async function startClaudeSession(
         pathToClaudeCodeExecutable: findClaudeBinary(),
         allowedTools: opts.approvedTools && opts.approvedTools.length > 0 ? opts.approvedTools : undefined,
         permissionMode: opts.permissionMode,
+        settings: opts.autoCompactWindow !== undefined ? { autoCompactWindow: opts.autoCompactWindow } : undefined,
         resume: opts.resumeSessionId,
         env,
         // When bypassPermissions is requested the SDK requires this flag.
