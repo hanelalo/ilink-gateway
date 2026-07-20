@@ -32,6 +32,12 @@ import {
   formatApprovalPrompt,
 } from './approval.js';
 import { formatStatus, switchCwd, addAlias, removeAlias, closeWorkspace } from './cd-command.js';
+import {
+  listSessionsForCwd,
+  resolveSession,
+  formatSessionList,
+  formatSwitchReply,
+} from './resume-command.js';
 import { StreamingBatcher, splitLongReply } from './streaming-batcher.js';
 
 const _require = createRequire(import.meta.url);
@@ -185,6 +191,8 @@ export async function start(): Promise<void> {
         '/cd + <n> <p>   - 添加别名',
         '/cd - <n>       - 删除别名',
         '/close <target> - 关闭指定工作区',
+        '/resume         - 列出当前 workspace 的历史 session',
+        '/resume <id>    - 切换到指定 session（支持 UUID 前缀）',
         '/approve        - 批准当前工具调用',
         '/deny           - 拒绝当前工具调用',
         '/approve session- 批准并记住当前工具',
@@ -247,6 +255,73 @@ export async function start(): Promise<void> {
         '',
         '还没有工作目录，请先使用 /cd 命令切换到一个目录。',
       ].join('\n'), undefined, JSON.stringify({ agent: config.agentName, workspace: path.basename(cwd || config.cwd) }));
+      return;
+    }
+
+    // /resume command - list or switch Claude Code sessions in current cwd
+    if (/^\/resume\b/.test(text)) {
+      const basename = path.basename(cwd);
+      const agentContext = JSON.stringify({ agent: config.agentName, workspace: basename });
+      const parts = text.trim().split(/\s+/);
+      const currentSessionId = user.sessions[cwd]?.sessionId ?? null;
+
+      // /resume (no args) → list sessions
+      if (parts.length === 1) {
+        try {
+          const sessions = await listSessionsForCwd(cwd);
+          const reply = formatSessionList(sessions, currentSessionId, basename);
+          await client.reply(msg.id, reply, undefined, agentContext);
+        } catch (err) {
+          console.error('listSessions error:', err);
+          await client.reply(msg.id, [
+            formatReplyHeader(basename),
+            '',
+            `读取 session 列表失败：${err instanceof Error ? err.message : String(err)}`,
+          ].join('\n'), undefined, agentContext);
+        }
+        return;
+      }
+
+      // /resume <id> → switch session
+      const inputId = parts.slice(1).join(' ');
+      try {
+        const sessions = await listSessionsForCwd(cwd);
+        const result = resolveSession(inputId, sessions);
+        if (result.error) {
+          const lines = [formatReplyHeader(basename), '', result.error];
+          if (result.matches && result.matches.length > 0) {
+            lines.push('', '匹配的 session：');
+            for (const m of result.matches) {
+              lines.push(`  · [${m.sessionId.slice(0, 8)}] ${(m.customTitle || m.summary || m.firstPrompt || '(无标题)').slice(0, 40)}`);
+            }
+          }
+          await client.reply(msg.id, lines.join('\n'), undefined, agentContext);
+          return;
+        }
+
+        const session = result.session!;
+        // Ensure session entry exists, then update sessionId
+        if (!user.sessions[cwd]) {
+          user.sessions[cwd] = {
+            sessionId: null,
+            lastActive: Date.now(),
+            approvedTools: [],
+          };
+        }
+        user.sessions[cwd].sessionId = session.sessionId;
+        user.sessions[cwd].lastActive = Date.now();
+        persistSessions();
+
+        const reply = formatSwitchReply(basename, session);
+        await client.reply(msg.id, reply, undefined, agentContext);
+      } catch (err) {
+        console.error('resume switch error:', err);
+        await client.reply(msg.id, [
+          formatReplyHeader(basename),
+          '',
+          `切换 session 失败：${err instanceof Error ? err.message : String(err)}`,
+        ].join('\n'), undefined, agentContext);
+      }
       return;
     }
 
