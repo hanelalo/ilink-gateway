@@ -20,8 +20,9 @@ A WeChat-connected Claude Code session manager. Registers as an agent with wecha
 | `CLAUDE_MODEL` | `sonnet` | Claude model |
 | `CLAUDE_CWD` | `process.cwd()` | Default working directory |
 | `CLAUDE_POLL_INTERVAL` | `1000` | Poll interval (ms) |
-| `CLAUDE_EFFORT` | `medium` | Claude Code effort level |
+| `CLAUDE_EFFORT` | `high` | Claude Code effort level |
 | `CLAUDE_SESSION_STORE_PATH` | `~/.wechat-gateway/claude-sessions.json` | Session persistence path |
+| `CLAUDE_AUTO_COMPACT_WINDOW` | - | Context compression threshold in tokens (e.g. `300000`). Not set = SDK default behavior |
 | `HTTP_PROXY` / `HTTPS_PROXY` | - | HTTP proxy configuration |
 
 ## Quick Start
@@ -34,10 +35,31 @@ claude
 cd /path/to/wechat-gateway/gateway
 cargo run
 
-# 3. Start adapter
+# 3. Start adapter in development
 cd /path/to/wechat-gateway/client/claude-code-adapter
 npx tsx src/index.ts
 ```
+
+## Building a Standalone Binary
+
+For production use, the adapter can be compiled into a standalone binary via [Bun](https://bun.sh):
+
+```bash
+# Build Rust gateway and Bun binary in one step
+bash scripts/build.sh
+
+# Or build only the adapter binary
+cd client/claude-code-adapter
+bun build --compile --outfile="../../target/release/wechat-claude" src/index.ts
+```
+
+This produces `target/release/wechat-claude` — a self-contained binary that requires no Node.js or Bun runtime at launch.
+
+The binary is managed by launchd on macOS via a plist service (`com.wechat-claude`) and auto-restarts if it crashes.
+
+### Environment Variables
+
+| Variable | Default | Description |
 
 ## WeChat Commands
 

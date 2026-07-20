@@ -20,8 +20,9 @@
 | `CLAUDE_MODEL` | `sonnet` | Claude 模型 |
 | `CLAUDE_CWD` | `process.cwd()` | 默认工作目录 |
 | `CLAUDE_POLL_INTERVAL` | `1000` | 轮询间隔(毫秒) |
-| `CLAUDE_EFFORT` | `medium` | Claude Code effort 级别 |
+| `CLAUDE_EFFORT` | `high` | Claude Code effort 级别 |
 | `CLAUDE_SESSION_STORE_PATH` | `~/.wechat-gateway/claude-sessions.json` | 会话持久化路径 |
+| `CLAUDE_AUTO_COMPACT_WINDOW` | - | 上下文压缩阈值（token 数量，如 `300000`）。不设置则使用 SDK 默认行为 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | - | HTTP 代理配置 |
 
 ## 快速启动
@@ -34,10 +35,27 @@ claude
 cd /path/to/wechat-gateway/gateway
 cargo run
 
-# 3. 启动 adapter
+# 3. 开发环境启动 adapter
 cd /path/to/wechat-gateway/client/claude-code-adapter
 npx tsx src/index.ts
 ```
+
+## 编译独立二进制
+
+生产环境建议通过 [Bun](https://bun.sh) 将 adapter 编译为独立二进制：
+
+```bash
+# 一键编译 Rust gateway 和 Bun 二进制
+bash scripts/build.sh
+
+# 或只编译 adapter 二进制
+cd client/claude-code-adapter
+bun build --compile --outfile="../../target/release/wechat-claude" src/index.ts
+```
+
+编译产物为 `target/release/wechat-claude` — 一个完全独立的二进制文件，启动时不需要 Node.js 或 Bun 运行时。
+
+macOS 上通过 launchd 以 plist 服务（`com.wechat-claude`）管理，崩溃后会自动重启。
 
 ## 微信交互命令
 

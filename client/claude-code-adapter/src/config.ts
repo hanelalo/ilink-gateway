@@ -6,7 +6,7 @@ export interface Config {
   model: string;
   cwd: string;
   pollIntervalMs: number;
-  effort: string;
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   sessionStorePath: string;
   autoCompactWindow?: number;
   httpProxy?: string;
@@ -20,7 +20,7 @@ export function loadConfig(): Config {
     model: envStr('CLAUDE_MODEL', 'sonnet'),
     cwd: envStr('CLAUDE_CWD', process.cwd()),
     pollIntervalMs: envInt('CLAUDE_POLL_INTERVAL', 1000),
-    effort: envStr('CLAUDE_EFFORT', 'high'),
+    effort: envStr('CLAUDE_EFFORT', 'high') as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
     sessionStorePath: envStr('CLAUDE_SESSION_STORE_PATH', os.homedir() + '/.wechat-gateway/claude-sessions.json'),
     httpProxy: envStrOrUndefined('HTTP_PROXY') ?? envStrOrUndefined('http_proxy'),
     httpsProxy: envStrOrUndefined('HTTPS_PROXY') ?? envStrOrUndefined('https_proxy'),
