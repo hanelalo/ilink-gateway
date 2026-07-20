@@ -169,6 +169,7 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
     pollIntervalMs: 50,
     effort: 'medium',
     sessionStorePath: '/tmp/test-sessions.json',
+    autoCompactWindow: 300000,
     ...overrides,
   };
 }
@@ -485,7 +486,7 @@ describe('startClaudeSession', () => {
     expect(queryCall.options?.settings).toEqual({ autoCompactWindow: 300000 });
   });
 
-  it('should not pass settings when autoCompactWindow is undefined', async () => {
+  it('should pass settings with default autoCompactWindow', async () => {
     const gen = messageSequence([
       systemInit('session-compact-2'),
       resultSuccess('session-compact-2'),
@@ -499,6 +500,6 @@ describe('startClaudeSession', () => {
     });
 
     const queryCall = vi.mocked(query).mock.calls[0][0];
-    expect(queryCall.options?.settings).toBeUndefined();
+    expect(queryCall.options?.settings).toEqual({ autoCompactWindow: 300000 });
   });
 });

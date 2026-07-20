@@ -68,20 +68,20 @@ describe('loadConfig', () => {
     expect(cfg.pollIntervalMs).toBe(1000);
   });
 
-  it('should return undefined autoCompactWindow when not set', () => {
-    const cfg = loadConfig();
-    expect(cfg.autoCompactWindow).toBeUndefined();
-  });
-
-  it('should parse autoCompactWindow from env', () => {
-    process.env.CLAUDE_AUTO_COMPACT_WINDOW = '300000';
+  it('should default autoCompactWindow to 300000 when not set', () => {
     const cfg = loadConfig();
     expect(cfg.autoCompactWindow).toBe(300000);
   });
 
-  it('should return undefined autoCompactWindow for invalid input', () => {
+  it('should parse autoCompactWindow from env', () => {
+    process.env.CLAUDE_AUTO_COMPACT_WINDOW = '60000';
+    const cfg = loadConfig();
+    expect(cfg.autoCompactWindow).toBe(60000);
+  });
+
+  it('should default autoCompactWindow to 300000 for invalid input', () => {
     process.env.CLAUDE_AUTO_COMPACT_WINDOW = 'not-a-number';
     const cfg = loadConfig();
-    expect(cfg.autoCompactWindow).toBeUndefined();
+    expect(cfg.autoCompactWindow).toBe(300000);
   });
 });
