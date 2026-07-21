@@ -176,7 +176,7 @@ cargo build --release
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/caffeinate</string>
-        <string>-disu</string>
+        <string>-isu</string>
         <string>/path/to/wechat-gateway/target/release/wechat-gateway</string>
     </array>
 
@@ -203,7 +203,7 @@ cargo build --release
 
 要点说明：
 - `ProcessType: Background` — 防止 macOS 在屏幕关闭后挂起进程
-- `caffeinate -disu` — 阻止显示器休眠、系统空闲休眠、系统休眠
+- `caffeinate -isu` — 阻止系统闲置休眠、合盖休眠，声明用户活跃——但**允许屏幕熄灭**（显示器正常关屏）
 - `KeepAlive: true` — 崩溃后自动重启
 - `RunAtLoad: true` — 登录时自动启动
 
@@ -236,8 +236,6 @@ launchctl list com.wechat-gateway
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/caffeinate</string>
-        <string>-disu</string>
         <string>/path/to/wechat-gateway/target/release/wechat-claude</string>
     </array>
 

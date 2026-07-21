@@ -175,7 +175,7 @@ Create `~/Library/LaunchAgents/com.wechat-gateway.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/caffeinate</string>
-        <string>-disu</string>
+        <string>-isu</string>
         <string>/path/to/wechat-gateway/target/release/wechat-gateway</string>
     </array>
 
@@ -202,7 +202,7 @@ Create `~/Library/LaunchAgents/com.wechat-gateway.plist`:
 
 Key points:
 - `ProcessType: Background` prevents macOS from suspending the process when the display is off
-- `caffeinate -disu` prevents display sleep, system idle sleep, and system sleep
+- `caffeinate -isu` prevents system idle sleep, lid sleep, and declares user activity — **but allows display sleep** (monitors can power off normally)
 - `KeepAlive: true` auto-restarts the process on crash
 - `RunAtLoad: true` starts on login
 
@@ -235,8 +235,6 @@ Create `~/Library/LaunchAgents/com.wechat-claude.plist` to run `wechat-claude` a
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/caffeinate</string>
-        <string>-disu</string>
         <string>/path/to/wechat-gateway/target/release/wechat-claude</string>
     </array>
 
