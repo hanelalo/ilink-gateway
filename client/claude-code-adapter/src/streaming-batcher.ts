@@ -190,8 +190,8 @@ export function splitLongMessage(
 
 /**
  * Helper: split text into header + body and apply long-message splitting to body.
- * Returns arrays of full strings (each with the header prefixed once for the first segment
- * and a shorter "…" header for continuation segments).
+ * Returns arrays of full strings. Because each segment is sent to WeChat as an
+ * independent reply, EVERY segment gets the full header so it is self-contained.
  */
 export function splitLongReply(
   header: string,
@@ -214,9 +214,9 @@ export function splitLongReply(
     return [`${header}\n\n${body}`];
   }
 
-  // First segment gets the full header
-  segments[0] = `${header}\n\n${segments[0]}`;
-  return segments;
+  // Every segment (first + continuations) gets the full header so each
+  // independently-sent reply is self-contained with workspace/agent context.
+  return segments.map((seg) => `${header}\n\n${seg}`);
 }
 
 /**

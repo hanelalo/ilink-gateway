@@ -95,15 +95,15 @@ describe('splitLongReply', () => {
     expect(result[0].startsWith(header)).toBe(true);
   });
 
-  it('should preserve full header only in first segment', () => {
+  it('should keep the full header on every segment', () => {
     const header = '**claude**:project';
     // Body needs enough content without blank lines (single block) to force multiple segments
     const body = 'a\n'.repeat(200);
     const result = splitLongReply(header, body, 100);
     expect(result.length).toBeGreaterThan(1);
-    expect(result[0].startsWith(`${header}\n\n`)).toBe(true);
-    for (let i = 1; i < result.length; i++) {
-      expect(result[i].startsWith(header)).toBe(false);
+    // Every segment has the full header so it is self-contained
+    for (const seg of result) {
+      expect(seg.startsWith(`${header}\n\n`)).toBe(true);
     }
   });
 
