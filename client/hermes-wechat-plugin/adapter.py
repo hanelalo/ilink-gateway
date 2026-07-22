@@ -452,11 +452,24 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
 
     # ── Internal: Register ──────────────────────────────────────────────
 
-    def _ensure_header(self, text: str) -> str:
-        """Prepend **<agent_name>** header if not already present."""
-        if text.startswith("**"):
-            return text
-        return f"**{self.agent_name}**\n---\n{text}"
+    def _split_reply(self, text: str, max_len: int) -> list[str]:
+        """Split a reply body into segments, each prefixed with the agent header.
+
+        Every segment is sent to WeChat as an independent reply, so each one
+        gets the full header to stay self-contained. The header length is
+        reserved from each segment's budget so no segment exceeds ``max_len``.
+        """
+        header = f"**{self.agent_name}**\n---"
+        header_len = len(header) + 2  # +2 for "\n\n"
+        body_max = max_len - header_len
+        if body_max <= 0:
+            return [f"{header}\n\n{text}"]
+        if len(text) <= body_max:
+            return [f"{header}\n\n{text}"]
+        segments = _split_content(text, body_max)
+        if len(segments) <= 1:
+            return [f"{header}\n\n{text}"]
+        return [f"{header}\n\n{seg}" for seg in segments]
 
     async def _register(self) -> bool:
         """POST /api/agents/register with this agent's name."""
@@ -596,9 +609,11 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
         Used for pairing codes, notifications, etc. where there is no
         pre-existing message context.
         """
-        if not media_paths:
-            text = self._ensure_header(text)
-        segments = _split_content(text, CONTENT_MAX_LENGTH)
+        if media_paths:
+            # Media captions are not prefixed with the agent header.
+            segments = _split_content(text, CONTENT_MAX_LENGTH)
+        else:
+            segments = self._split_reply(text, CONTENT_MAX_LENGTH)
         if not segments:
             segments = [""]
 
@@ -630,9 +645,11 @@ class WeChatGatewayAdapter(BasePlatformAdapter):
 
     async def _send_reply(self, reply_to_id: str, text: str, media_paths: Optional[list[str]] = None) -> SendResult:
         """POST /api/agents/{name}/reply with the response."""
-        if not media_paths:
-            text = self._ensure_header(text)
-        segments = _split_content(text, CONTENT_MAX_LENGTH)
+        if media_paths:
+            # Media captions are not prefixed with the agent header.
+            segments = _split_content(text, CONTENT_MAX_LENGTH)
+        else:
+            segments = self._split_reply(text, CONTENT_MAX_LENGTH)
         if not segments:
             segments = [""]
 
