@@ -383,6 +383,78 @@ export async function start(): Promise<void> {
       return;
     }
 
+    // ---- 2.5 /compact command: manually compact the session context ----
+    if (/^\/compact\b/.test(text)) {
+      const basename = path.basename(cwd);
+      const agentContext = JSON.stringify({ agent: config.agentName, workspace: basename });
+      const sessionId = user.sessions[cwd]?.sessionId;
+
+      if (!sessionId) {
+        await client.reply(msg.id, [
+          formatReplyHeader(basename),
+          '',
+          '当前工作区还没有可压缩的会话历史，请先和 Claude 对话几轮。',
+        ].join('\n'), undefined, agentContext);
+        return;
+      }
+
+      // If a query is already running for this cwd, queue the command and
+      // handle it once that query finishes (processQueue re-enters handleMessage).
+      if (runningQuery) {
+        runningQuery.messageQueue.push({ id: msg.id, text });
+        await client.reply(msg.id, [
+          formatReplyHeader(basename),
+          '',
+          '上一个请求仍在处理中，已加入队列',
+        ].join('\n'), undefined, agentContext);
+        return;
+      }
+
+      const compactQuery = queryManager.start(wxid, cwd);
+      let compacted = false;
+      let capturedText = '';
+      startClaudeSession({
+        cwd,
+        prompt: text, // forward "/compact [instructions]" verbatim
+        resumeSessionId: sessionId,
+        permissionMode: permissionModeMap.get(wxid) ?? 'default',
+        autoCompactWindow: config.autoCompactWindow,
+        onAssistantText: (t) => { capturedText += t; },
+        onCompact: (info) => {
+          compacted = true;
+          const lines = [
+            formatReplyHeader(basename),
+            '',
+            '上下文已压缩（手动触发）',
+            `压缩前 token 数：${info.preTokens}` +
+              (info.postTokens != null ? `，压缩后约 ${info.postTokens}` : ''),
+          ];
+          client.reply(msg.id, lines.join('\n'), undefined, agentContext).catch((err) => {
+            console.error('Failed to send compact reply:', err);
+          });
+        },
+        abortController: compactQuery.abortController,
+      })
+        .then(() => {
+          queryManager.remove(wxid, cwd);
+          if (!compacted) {
+            const body = capturedText.trim() || '压缩完成（无可用统计信息）。';
+            client.reply(msg.id, [
+              formatReplyHeader(basename),
+              '',
+              body,
+            ].join('\n'), undefined, agentContext).catch((err) => {
+              console.error('Failed to send compact reply:', err);
+            });
+          }
+        })
+        .catch((err) => {
+          console.error('Compact error:', err);
+          queryManager.remove(wxid, cwd);
+        });
+      return;
+    }
+
     // ---- 3. Routing: if cwd has a running query, queue the message ----
     if (runningQuery) {
       // Check if the query is actually still running by seeing if it has pending approval
@@ -499,6 +571,21 @@ export async function start(): Promise<void> {
       onSessionInit: (sessionId) => {
         sessionEntry.sessionId = sessionId;
         persistSessions();
+      },
+      onCompact: (info) => {
+        // Only notify for auto-compaction (manual /compact has its own reply
+        // handled in the dedicated command branch above).
+        if (info.trigger === 'manual') return;
+        const lines = [
+          formatReplyHeader(basename),
+          '',
+          '上下文已自动压缩',
+          `压缩前 token 数：${info.preTokens}` +
+            (info.postTokens != null ? `，压缩后约 ${info.postTokens}` : ''),
+        ];
+        client.reply(msg.id, lines.join('\n'), undefined, agentContext).catch((err) => {
+          console.error('Failed to send auto-compact notice:', err);
+        });
       },
       abortController,
     })

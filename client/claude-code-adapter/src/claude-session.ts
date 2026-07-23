@@ -5,6 +5,15 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { loadConfig } from './config.js';
 
+export interface CompactInfo {
+  /** Token count before compaction. */
+  preTokens: number;
+  /** Token count after compaction, if reported by the SDK. */
+  postTokens?: number;
+  /** What triggered the compaction (e.g. "manual" for /compact). */
+  trigger: string;
+}
+
 export interface StartClaudeSessionOptions {
   cwd: string;
   prompt: string;
@@ -15,6 +24,7 @@ export interface StartClaudeSessionOptions {
   canUseTool?: (toolName: string, input: unknown) => Promise<'allow' | 'deny'>;
   onAssistantText?: (text: string) => void;
   onSessionInit?: (sessionId: string) => void;
+  onCompact?: (info: CompactInfo) => void;
   abortController: AbortController;
 }
 
@@ -26,6 +36,7 @@ export interface StartClaudeSessionOptions {
  * - system/init → onSessionInit(sessionId)
  * - assistant/text → onAssistantText(text)
  * - assistant/tool_use → canUseTool(toolName, input)
+ * - system/compact_boundary → onCompact(info)
  * - result → end
  *
  * Returns the session ID obtained from the init message and a success flag.
@@ -118,6 +129,25 @@ export async function startClaudeSession(
         const init = msg as { session_id: string };
         sessionId = init.session_id;
         opts.onSessionInit?.(sessionId);
+        continue;
+      }
+
+      if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+        const cb = msg as {
+          compact_metadata?: {
+            pre_tokens?: number;
+            post_tokens?: number;
+            trigger?: string;
+          };
+        };
+        const meta = cb.compact_metadata;
+        if (meta) {
+          opts.onCompact?.({
+            preTokens: meta.pre_tokens ?? 0,
+            postTokens: meta.post_tokens,
+            trigger: meta.trigger ?? 'manual',
+          });
+        }
         continue;
       }
 
